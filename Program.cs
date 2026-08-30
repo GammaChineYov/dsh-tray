@@ -18,7 +18,7 @@ public class LogForm : Form {
 
 public class TrayApp : ApplicationContext {
   NotifyIcon icon; ContextMenuStrip menu; LogForm logForm; System.Windows.Forms.Timer clock; bool adopted=false;
-  ToolStripMenuItem? itemOpenChat; ToolStripSeparator? sepSess; ToolStripMenuItem? pm,pm0,pm1,pm2;
+  ToolStripMenuItem? itemOpenChat,autoStartItem; ToolStripSeparator? sepSess; ToolStripMenuItem? pm,pm0,pm1,pm2;
   ToolStripMenuItem? gpuMenu,gpuAllItem,gpuCpuItem,ctxMenu; List<(ToolStripMenuItem item,int idx)> gpuItems=new(); List<ToolStripMenuItem> ctxItems=new();
   Form? popup; WebView2? wv; Form? officialForm; WebView2? officialWv;
   string gpuTip=""; int gpuTick=0; string cpuTemp="-";
@@ -84,6 +84,9 @@ public class TrayApp : ApplicationContext {
     var m7=new ToolStripMenuItem("查看日志",null,(s,e)=>{logForm.Show();logForm.BringToFront();});
     var openCfg=new ToolStripMenuItem("打开配置文件",null,(s,e)=>{ try{ Process.Start(new ProcessStartInfo(Config.Path_){UseShellExecute=true}); }catch{} });
     items.Add(m7); items.Add(openCfg); items.Add(new ToolStripSeparator());
+    autoStartItem=new ToolStripMenuItem("开机自启动",null,(s,e)=>ToggleAutoStart(autoStartItem)){CheckOnClick=true, Checked=AutoStart.Enabled()};
+    autoStartItem.ToolTipText="在用户启动文件夹创建快捷方式，登录 Windows 自动运行 DSH托盘";
+    items.Add(autoStartItem);
     var m8=new ToolStripMenuItem("退出",null,(s,e)=>ExitApp());
     items.Add(m8);
     menu.Items.AddRange(items.ToArray());
@@ -100,6 +103,7 @@ public class TrayApp : ApplicationContext {
     } }catch{}
   }
   void SaveCfg(){ try{ File.WriteAllText(Cfg(),"paramMode="+paramMode+"\r\ngpu="+gpuSel.CfgString()+"\r\nctx="+ctxVal+"\r\n"); }catch{} }
+  void ToggleAutoStart(ToolStripMenuItem it){ AutoStart.Set(it.Checked); it.Checked=AutoStart.Enabled(); }
   void SetParam(int m){ paramMode=m; RefreshChecks(); SaveCfg(); string label=m==0?"通用思考 (temp1.0/pres1.5)":m==1?"编码思考 (temp0.6/pres0.0)":"Instruct (temp0.7/pres1.5)"; logForm.Append("推理参数组: "+label+"（重启对应服务后生效）\r\n"); }
   static void KeepOpen(ToolStripDropDown dd){ dd.Closing += (s,e)=>{ if(e.CloseReason==ToolStripDropDownCloseReason.ItemClicked) e.Cancel=true; }; }
   void SetGpuAll(){ gpuSel.UseAll=true; gpuSel.UseCpu=false; gpuSel.Indices.Clear(); RefreshChecks(); SaveCfg(); }
