@@ -1,0 +1,8 @@
+bin/
+obj/
+publish/
+*.cfg
+dsh-tray-config.json
+webview-userdata/
+*.user
+.vs/

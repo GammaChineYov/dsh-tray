@@ -1,0 +1,51 @@
+# DSH托盘 (DSHTray)
+
+Windows 系统托盘应用，用于管理本机 **llama.cpp** 本地大模型服务（Qwen 系列），并在托盘悬浮展示每张 GPU 的实时状态。
+
+## 功能
+
+- **服务管理**：启动 / 停止 / 重启多个 llama-server 服务（通过配置文件可增删改，含端口、模型、mmproj、batch、provider）。
+- **GPU 选择**（复选框，可多选）：全部（GPU）/ CPU / 单卡（GPU0、GPU1…）；启动时按所选部署：
+  - 多卡 → `CUDA_VISIBLE_DEVICES=<idx,...>` + `--split-mode row`（张量并行）
+  - 单卡 → `CUDA_VISIBLE_DEVICES=<idx>` + `--split-mode none`
+  - CPU → `-ngl 0`（关闭 flash-attn / 量化 KV）
+- **上下文长度**（单选）：8K / 16K / 32K / 64K / 128K / 192K / 256K，启动时作为 `-c` 应用。
+- **推理参数组**（单选）：通用思考 / 编码思考 / Instruct 三组官方采样参数。
+- **托盘悬浮（tooltip）**：每张 GPU 的 显存 GB / 占用 % / 温度 °C（nvidia-smi 每 5s 刷新）+ 运行中的模型行。
+- **打开 DSH 会话**：WebView2 嵌入 DSH Web（`http://127.0.0.1:3080/`），继承 markdown / 工具闭环 / 插件。
+- **打开官方会话 chat**：WebView2 打开 `https://chat.deepseek.com`，使用独立持久化用户数据目录（登录态跨重启保持）。
+
+## 构建
+
+依赖：
+- .NET 8 SDK
+- WebView2 Runtime（WinForms 运行时）
+- `nvidia-smi`（GPU 状态；无 NVIDIA 卡时仅显示 CPU 模式）
+
+```powershell
+dotnet publish -c Release -o publish
+```
+
+运行：`publish\DSHTray.exe`（右键托盘图标使用；桌面生成快捷方式可指向它）。
+
+## 配置文件
+
+首次运行在 **exe 同目录**生成 `dsh-tray-config.json`，可编辑：
+
+| 字段 | 说明 |
+|------|------|
+| `llamaServerExe` | llama-server 可执行文件路径 |
+| `dshUrl` | DSH Web 地址 |
+| `settingsYamlPath` | DSH `settings.yaml` 路径（打开会话时临时改写 `agent-default-model`） |
+| `officialDeepSeekUrl` | 官方会话地址 |
+| `services[]` | 每个服务的 `name/port/model/useMmproj/mmproj/batch/ubatch/specDecode/provider/enabled` |
+
+运行时状态（GPU 选择、ctx、参数组）存 `dsh-tray.cfg`（`paramMode` / `gpu` / `ctx`），自动读写。
+
+> 提示：修改 `dsh-tray-config.json` 后**重启托盘**生效；托盘菜单「打开配置文件」可直接打开该文件编辑。
+
+## 说明
+
+- 托盘只管理**自己启动**的进程（端口监听检测），外部启动的服务会提示"已在跑（非本应用）"。
+- 多卡无 NVLink 时，张量并行主要是摊开权重 / KV、解锁更大上下文，解码仍受显存带宽限制。
+- 首次请求有 CUDA JIT 暖机（约 20-30s），之后正常。
