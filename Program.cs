@@ -21,7 +21,7 @@ public class TrayApp : ApplicationContext {
   ToolStripMenuItem? itemOpenChat; ToolStripSeparator? sepSess; ToolStripMenuItem? pm,pm0,pm1,pm2;
   ToolStripMenuItem? gpuMenu,gpuAllItem,gpuCpuItem,ctxMenu; List<(ToolStripMenuItem item,int idx)> gpuItems=new(); List<ToolStripMenuItem> ctxItems=new();
   Form? popup; WebView2? wv; Form? officialForm; WebView2? officialWv;
-  string gpuTip=""; int gpuTick=0;
+  string gpuTip=""; int gpuTick=0; string cpuTemp="-";
   List<Gpu> gpus=new(); GpuSelection gpuSel=GpuSelection.FromCfg("all"); int ctxVal=196608;
   int paramMode=1; // 0=通用思考 1=编码思考 2=Instruct
   AppConfig cfg; List<Service> services=new(); List<(ToolStripMenuItem item,Service svc)> sessionItems=new(); List<(ToolStripMenuItem item,Service svc)> startItems=new();
@@ -197,11 +197,15 @@ public class TrayApp : ApplicationContext {
     foreach(var si in sessionItems) si.item.Visible = si.svc.Running;
     if(sepSess!=null) sepSess.Visible = services.Any(s=>s.Running);
     gpuTick++; if(gpuTick%5==0){ gpus=GpuInfo.Discover(); gpuTip=string.Join("\n",gpus.Select(g=>g.Line)); }
+    double cpu=SysInfo.CpuPercent();
+    var mem=SysInfo.Mem();
+    if(gpuTick%5==0){ double t=SysInfo.CpuTemp(); cpuTemp=double.IsNaN(t)?"-":t.ToString("0")+"°C"; }
     string tip="";
     foreach(var s in services) if(s.Running) tip+=Short(s)+"("+s.Port+"):"+s.State+" RAM "+s.RamGb+"\n";
     if(tip.Length==0)tip="（无运行中的模型）\n";
     tip+=gpuTip.Length>0?gpuTip:(gpus.Count>0?"GPU: 查询中":"GPU: 无");
-    icon.Text=tip.TrimEnd();
+    tip+="\nCPU: "+cpu.ToString("0")+"% "+cpuTemp+" 内存: "+mem.usedPct.ToString("0")+"%";
+    try{ icon.Text=tip.TrimEnd(); }catch{}
     foreach(var svc in services){ long L=svc.log.Length; if(L>svc.lastLen){ string t=svc.log.ToString((int)svc.lastLen,(int)(L-svc.lastLen)); svc.lastLen=L; logForm.Append("["+svc.Name+"] "+t); } }
   }
 
