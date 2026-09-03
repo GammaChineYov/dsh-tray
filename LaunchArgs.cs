@@ -63,8 +63,9 @@ public static class LaunchArgs {
   }
 
   // 构建 llama-server 参数 + CUDA_VISIBLE_DEVICES（envCuda 为空串表示不设置）
-  // GPU 规则：CPU→-ngl 0（去 flash-attn/量化 KV）；单卡→-ngl 99 --split-mode none；多卡→-ngl 99 --split-mode row（张量并行）+ --main-gpu 0
-  public static LaunchResult Build(Service svc, GpuSelection gpu, int ctx, int paramMode, int gpuCount) {
+  // splitMode: 0=按层切分 layer（多卡默认，不依赖 CUDA split buffers）；1=张量并行 row（需 split buffers 支持）
+  // GPU 规则：CPU→-ngl 0（去 flash-attn/量化 KV）；单卡→-ngl 99 --split-mode none；多卡→-ngl 99 --split-mode <layer|row> + --main-gpu 0
+  public static LaunchResult Build(Service svc, GpuSelection gpu, int ctx, int paramMode, int splitMode, int gpuCount) {
     var r = new LaunchResult();
     var a = r.args;
     a.Add("-m"); a.Add(svc.Model);
@@ -82,7 +83,7 @@ public static class LaunchArgs {
     } else {
       r.envCuda = string.Join(",", eff);
       a.Add("-ngl"); a.Add("99");
-      a.Add("--split-mode"); a.Add("row");      // 张量并行
+      a.Add("--split-mode"); a.Add(splitMode==1 ? "row" : "layer"); // row=张量并行(需split buffers)；layer=按层切分
       a.Add("--main-gpu"); a.Add("0");
     }
     if (!cpu) {

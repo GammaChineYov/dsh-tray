@@ -20,10 +20,12 @@ public class TrayApp : ApplicationContext {
   NotifyIcon icon; ContextMenuStrip menu; LogForm logForm; System.Windows.Forms.Timer clock; bool adopted=false;
   ToolStripMenuItem? itemOpenChat,autoStartItem; ToolStripSeparator? sepSess; ToolStripMenuItem? pm,pm0,pm1,pm2;
   ToolStripMenuItem? gpuMenu,gpuAllItem,gpuCpuItem,ctxMenu; List<(ToolStripMenuItem item,int idx)> gpuItems=new(); List<ToolStripMenuItem> ctxItems=new();
+  ToolStripMenuItem? splitMenu,splitLayerItem,splitRowItem;
   Form? popup; WebView2? wv; Form? officialForm; WebView2? officialWv;
-  string gpuTip=""; int gpuTick=0; string cpuTemp="-";
-  List<Gpu> gpus=new(); GpuSelection gpuSel=GpuSelection.FromCfg("all"); int ctxVal=196608;
+  volatile string gpuTip=""; int gpuTick=0; volatile string cpuTemp="-"; volatile string _lastTip=""; int _lastIconMs=0;
+  volatile List<Gpu> gpus=new(); GpuSelection gpuSel=GpuSelection.FromCfg("all"); int ctxVal=196608;
   int paramMode=1; // 0=通用思考 1=编码思考 2=Instruct
+  int splitMode=0; // 0=按层切分 layer（多卡默认，无需 split buffers） 1=张量并行 row
   AppConfig cfg; List<Service> services=new(); List<(ToolStripMenuItem item,Service svc)> sessionItems=new(); List<(ToolStripMenuItem item,Service svc)> startItems=new();
 
   public TrayApp(){
@@ -63,7 +65,7 @@ public class TrayApp : ApplicationContext {
     items.Add(pm); items.Add(new ToolStripSeparator());
     // GPU 选择（复选框：全部（GPU）/ CPU / GPUn 可多选）
     gpuMenu=new ToolStripMenuItem("GPU: 全部");
-    gpuMenu.ToolTipText="启动服务时按所选 GPU 部署：多卡=张量并行(--split-mode row)、单卡=--split-mode none、CPU=-ngl 0";
+    gpuMenu.ToolTipText="启动服务时按所选 GPU 部署：多卡=--split-mode（见「切分模式」）、单卡=--split-mode none、CPU=-ngl 0";
     gpuAllItem=new ToolStripMenuItem("全部（GPU）",null,(s,e)=>SetGpuAll());
     gpuCpuItem=new ToolStripMenuItem("CPU",null,(s,e)=>SetGpuCpu());
     gpuMenu.DropDownItems.Add(gpuAllItem); gpuMenu.DropDownItems.Add(gpuCpuItem);
@@ -77,8 +79,16 @@ public class TrayApp : ApplicationContext {
     string[] ctxLabels={"8K","16K","32K","64K","128K","192K","256K"};
     for(int i=0;i<LaunchArgs.CtxOptions.Length;i++){ int v=LaunchArgs.CtxOptions[i]; var it=new ToolStripMenuItem(ctxLabels[i],null,(s,e)=>{ ctxVal=v; RefreshChecks(); SaveCfg(); }); it.CheckOnClick=false; ctxItems.Add(it); ctxMenu.DropDownItems.Add(it); }
     items.Add(ctxMenu);
+    // 多卡切分模式（单选）：按层切分 layer（推荐，无需 split buffers）/ 张量并行 row（需 CUDA split buffers 支持）
+    splitMenu=new ToolStripMenuItem("切分模式");
+    splitMenu.ToolTipText="多卡部署时应用的 --split-mode：按层切分 layer=推荐（无需 split buffers）、张量并行 row=需 CUDA split buffers 支持";
+    splitLayerItem=new ToolStripMenuItem("按层切分 layer（推荐）",null,(s,e)=>SetSplit(0));
+    splitRowItem=new ToolStripMenuItem("张量并行 row",null,(s,e)=>SetSplit(1));
+    splitLayerItem.CheckOnClick=false; splitRowItem.CheckOnClick=false;
+    splitMenu.DropDownItems.AddRange(new ToolStripItem[]{splitLayerItem,splitRowItem});
+    items.Add(splitMenu);
     // 复选/单选二级菜单：点击后不隐藏（点外部/ESC 才关闭）
-    KeepOpen(pm.DropDown); KeepOpen(gpuMenu.DropDown); KeepOpen(ctxMenu.DropDown);
+    KeepOpen(pm.DropDown); KeepOpen(gpuMenu.DropDown); KeepOpen(ctxMenu.DropDown); KeepOpen(splitMenu.DropDown);
     RefreshChecks();
     items.Add(new ToolStripSeparator());
     var m7=new ToolStripMenuItem("查看日志",null,(s,e)=>{logForm.Show();logForm.BringToFront();});
@@ -100,11 +110,13 @@ public class TrayApp : ApplicationContext {
       if(l.StartsWith("paramMode=")){ int m; if(int.TryParse(l.Substring(10),out m)&&m>=0&&m<=2) paramMode=m; }
       else if(l.StartsWith("gpu=")) gpuSel=GpuSelection.FromCfg(l.Substring(4));
       else if(l.StartsWith("ctx=")){ int v; if(int.TryParse(l.Substring(4),out v)&&Array.IndexOf(LaunchArgs.CtxOptions,v)>=0) ctxVal=v; }
+      else if(l.StartsWith("split=")){ string s2=l.Substring(6).Trim().ToLowerInvariant(); splitMode = (s2=="row") ? 1 : 0; }
     } }catch{}
   }
-  void SaveCfg(){ try{ File.WriteAllText(Cfg(),"paramMode="+paramMode+"\r\ngpu="+gpuSel.CfgString()+"\r\nctx="+ctxVal+"\r\n"); }catch{} }
+  void SaveCfg(){ try{ File.WriteAllText(Cfg(),"paramMode="+paramMode+"\r\ngpu="+gpuSel.CfgString()+"\r\nctx="+ctxVal+"\r\nsplit="+(splitMode==0?"layer":"row")+"\r\n"); }catch{} }
   void ToggleAutoStart(ToolStripMenuItem it){ AutoStart.Set(it.Checked); it.Checked=AutoStart.Enabled(); }
   void SetParam(int m){ paramMode=m; RefreshChecks(); SaveCfg(); string label=m==0?"通用思考 (temp1.0/pres1.5)":m==1?"编码思考 (temp0.6/pres0.0)":"Instruct (temp0.7/pres1.5)"; logForm.Append("推理参数组: "+label+"（重启对应服务后生效）\r\n"); }
+  void SetSplit(int m){ splitMode=m; RefreshChecks(); SaveCfg(); logForm.Append("切分模式: "+(m==0?"按层切分 layer":"张量并行 row")+"（重启对应服务后生效）\r\n"); }
   static void KeepOpen(ToolStripDropDown dd){ dd.Closing += (s,e)=>{ if(e.CloseReason==ToolStripDropDownCloseReason.ItemClicked) e.Cancel=true; }; }
   void SetGpuAll(){ gpuSel.UseAll=true; gpuSel.UseCpu=false; gpuSel.Indices.Clear(); RefreshChecks(); SaveCfg(); }
   void SetGpuCpu(){ gpuSel.UseAll=false; gpuSel.UseCpu=true; gpuSel.Indices.Clear(); RefreshChecks(); SaveCfg(); }
@@ -120,6 +132,8 @@ public class TrayApp : ApplicationContext {
     foreach(var t in gpuItems) t.item.Checked = !gpuSel.UseCpu && !gpuSel.UseAll && gpuSel.Indices.Contains(t.idx);
     for(int i=0;i<ctxItems.Count;i++) ctxItems[i].Checked = (LaunchArgs.CtxOptions[i]==ctxVal);
     if(pm0!=null) pm0.Checked=(paramMode==0); if(pm1!=null) pm1.Checked=(paramMode==1); if(pm2!=null) pm2.Checked=(paramMode==2);
+    if(splitLayerItem!=null) splitLayerItem.Checked=(splitMode==0);
+    if(splitRowItem!=null) splitRowItem.Checked=(splitMode==1);
     if(gpuMenu!=null) gpuMenu.Text="GPU: "+gpuSel.ShortLabel();
     if(ctxMenu!=null) ctxMenu.Text="上下文: "+(ctxVal/1024)+"K";
   }
@@ -128,15 +142,15 @@ public class TrayApp : ApplicationContext {
   void Start(Service svc){
     if(svc.Running){ Log(svc,svc.Name+" 已在运行 (端口 "+svc.Port+")\r\n"); return; }
     if(PortUp(svc.Port)){ Log(svc,"端口 "+svc.Port+" 已有服务在跑（非本应用启动），请先停用外部进程。\r\n"); return; }
-    var build=LaunchArgs.Build(svc,gpuSel,ctxVal,paramMode,gpus.Count);
+    var build=LaunchArgs.Build(svc,gpuSel,ctxVal,paramMode,splitMode,gpus.Count);
     var psi=new ProcessStartInfo(cfg.LlamaServerExe,string.Join(" ",build.args)){UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true,CreateNoWindow=true};
     if(build.envCuda.Length>0) psi.Environment["CUDA_VISIBLE_DEVICES"]=build.envCuda;
     try{
       svc.proc=Process.Start(psi); svc.proc.OutputDataReceived+=(o,e)=>{if(e.Data!=null)svc.log.AppendLine(e.Data);}; svc.proc.ErrorDataReceived+=(o,e)=>{if(e.Data!=null)svc.log.AppendLine("[err] "+e.Data);}; svc.proc.BeginOutputReadLine(); svc.proc.BeginErrorReadLine();
       Log(svc,">>> 启动 "+svc.Name+" (端口 "+svc.Port+")\r\n");
-      Log(svc,"    GPU="+gpuSel.Describe(gpus)+" | ctx="+(ctxVal/1024)+"K | CUDA_VISIBLE_DEVICES="+(build.envCuda.Length>0?build.envCuda:"-")+" | 参数组="+(paramMode==0?"通用思考":paramMode==1?"编码思考":"Instruct")+"\r\n");
+      Log(svc,"    GPU="+gpuSel.Describe(gpus)+" | ctx="+(ctxVal/1024)+"K | CUDA_VISIBLE_DEVICES="+(build.envCuda.Length>0?build.envCuda:"-")+" | 参数组="+(paramMode==0?"通用思考":paramMode==1?"编码思考":"Instruct")+" | 切分="+(splitMode==0?"按层 layer":splitMode==1?"张量并行 row":"-")+"\r\n");
       if(gpuSel.UseCpu) Log(svc,"    注意: CPU 模式（-ngl 0），速度会显著变慢\r\n");
-      else if(ctxVal>=196608 && LaunchArgs.EffectiveGpus(gpuSel,gpus.Count).Count==1 && (svc.Model.Contains("35B")||svc.Model.Contains("27B"))) Log(svc,"    注意: "+(ctxVal/1024)+"K 上下文 + 单 GPU 可能显存不足（OOM），建议多卡张量并行或降低 ctx\r\n");
+      else if(ctxVal>=196608 && LaunchArgs.EffectiveGpus(gpuSel,gpus.Count).Count==1 && (svc.Model.Contains("35B")||svc.Model.Contains("27B"))) Log(svc,"    注意: "+(ctxVal/1024)+"K 上下文 + 单 GPU 可能显存不足（OOM），建议 GPU=全部（多卡，切分模式=按层 layer）或降低 ctx\r\n");
       Log(svc,"    首次加载约 30-60s\r\n");
     }
     catch(Exception ex){ Log(svc,">>> 启动 "+svc.Name+" 失败: "+ex.Message+"\r\n"); }
@@ -197,19 +211,29 @@ public class TrayApp : ApplicationContext {
     }catch{}
   }
   void Tick(){
-    if(!adopted){ adopted=true; foreach(var s in services) Adopt(s); }
+    if(!adopted){ adopted=true; Task.Run(()=>{ foreach(var s in services) Adopt(s); }); }
     foreach(var si in sessionItems) si.item.Visible = si.svc.Running;
     if(sepSess!=null) sepSess.Visible = services.Any(s=>s.Running);
-    gpuTick++; if(gpuTick%5==0){ gpus=GpuInfo.Discover(); gpuTip=string.Join("\n",gpus.Select(g=>g.Line)); }
+    gpuTick++; 
     double cpu=SysInfo.CpuPercent();
     var mem=SysInfo.Mem();
-    if(gpuTick%5==0){ double t=SysInfo.CpuTemp(); cpuTemp=double.IsNaN(t)?"-":t.ToString("0")+"°C"; }
+    if(gpuTick%5==0){
+      // nvidia-smi (GpuInfo.Discover) + WMI CPU温度 采样较慢，放到后台线程，避免阻塞 UI 线程（右键/菜单即时响应）
+      Task.Run(()=>{
+        try{
+          var gl=GpuInfo.Discover(); gpus=gl; gpuTip=string.Join("\n",gl.Select(g=>g.Line));
+          double t=SysInfo.CpuTemp(); cpuTemp=double.IsNaN(t)?"-":t.ToString("0")+"°C";
+        }catch{}
+      });
+    }
     string tip="";
     foreach(var s in services) if(s.Running) tip+=Short(s)+"("+s.Port+"):"+s.State+" RAM "+s.RamGb+"\n";
     if(tip.Length==0)tip="（无运行中的模型）\n";
     tip+=gpuTip.Length>0?gpuTip:(gpus.Count>0?"GPU: 查询中":"GPU: 无");
     tip+="\nCPU: "+cpu.ToString("0")+"% "+cpuTemp+" 内存: "+mem.usedPct.ToString("0")+"%";
-    try{ icon.Text=tip.TrimEnd(); }catch{}
+    // 只在 tooltip 内容变化、无菜单/下拉打开、且距上次至少 3s 时才更新 icon.Text（NotifyIcon.Text=Shell_NotifyIcon，频繁设置会阻塞 UI 线程）
+    string tipNow = tip.TrimEnd();
+    if(!menu.Visible && tipNow != _lastTip && Environment.TickCount - _lastIconMs >= 3000){ _lastTip = tipNow; _lastIconMs = Environment.TickCount; try{ icon.Text=tipNow; }catch{} }
     foreach(var svc in services){ long L=svc.log.Length; if(L>svc.lastLen){ string t=svc.log.ToString((int)svc.lastLen,(int)(L-svc.lastLen)); svc.lastLen=L; logForm.Append("["+svc.Name+"] "+t); } }
   }
 

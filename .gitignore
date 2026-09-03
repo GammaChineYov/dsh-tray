@@ -1,6 +1,7 @@
 bin/
 obj/
 publish/
+publish-new/
 *.cfg
 dsh-tray-config.json
 webview-userdata/

@@ -6,9 +6,10 @@ Windows 系统托盘应用，用于管理本机 **llama.cpp** 本地大模型服
 
 - **服务管理**：启动 / 停止 / 重启多个 llama-server 服务（通过配置文件可增删改，含端口、模型、mmproj、batch、provider）。
 - **GPU 选择**（复选框，可多选）：全部（GPU）/ CPU / 单卡（GPU0、GPU1…）；启动时按所选部署：
-  - 多卡 → `CUDA_VISIBLE_DEVICES=<idx,...>` + `--split-mode row`（张量并行）
+  - 多卡 → `CUDA_VISIBLE_DEVICES=<idx,...>` + `--split-mode <layer|row>`（取「切分模式」的值）
   - 单卡 → `CUDA_VISIBLE_DEVICES=<idx>` + `--split-mode none`
   - CPU → `-ngl 0`（关闭 flash-attn / 量化 KV）
+- **切分模式**（单选，仅多卡时生效）：按层切分 `layer`（推荐，无需 CUDA split buffers）/ 张量并行 `row`（需 split buffers 支持，用于摊开权重/KV 解锁更大上下文）。
 - **上下文长度**（单选）：8K / 16K / 32K / 64K / 128K / 192K / 256K，启动时作为 `-c` 应用。
 - **推理参数组**（单选）：通用思考 / 编码思考 / Instruct 三组官方采样参数。
 - **托盘悬浮（tooltip）**：每张 GPU 的 显存 GB / 占用 % / 温度 °C（nvidia-smi 每 5s 刷新）+ 运行中的模型行。
@@ -40,7 +41,7 @@ dotnet publish -c Release -o publish
 | `officialDeepSeekUrl` | 官方会话地址 |
 | `services[]` | 每个服务的 `name/port/model/useMmproj/mmproj/batch/ubatch/specDecode/provider/enabled` |
 
-运行时状态（GPU 选择、ctx、参数组）存 `dsh-tray.cfg`（`paramMode` / `gpu` / `ctx`），自动读写。
+运行时状态（GPU 选择、ctx、参数组、切分模式）存 `dsh-tray.cfg`（`paramMode` / `gpu` / `ctx` / `split`），自动读写。
 
 > 提示：修改 `dsh-tray-config.json` 后**重启托盘**生效；托盘菜单「打开配置文件」可直接打开该文件编辑。
 
