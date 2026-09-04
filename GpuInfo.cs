@@ -13,11 +13,17 @@ public class Gpu {
   public int UtilPct;
   public int TempC;
   public bool Ok;              // 发现成功且有显存
-  public string Line { get { return string.Format("GPU{0}: {1:0.0}/{2:0.0}G {3}% {4}\u00B0C", Index, UsedGiB, TotalGiB, UtilPct, TempC); } }
+  public string Line { get { return string.Format("GPU{0}: {1:0.0}/{2:0.0}G {3}% {4}°C", Index, UsedGiB, TotalGiB, UtilPct, TempC); } }
 }
 
 public static class GpuInfo {
   // nvidia-smi 查询全部 GPU：index,pci.bus_id,name,memory.total,memory.used,utilization.gpu,temperature.gpu
+  // 注意(WDDM 双卡)：
+  //   1) nvidia-smi 的 memory.used 在"SLI 启用"时会把主卡的显存占用镜像到所有卡（双卡显存一样）。
+  //      => 根因是 SLI（NVIDIA 论坛 285829）；禁用 SLI（控制面板->配置 SLI->禁用）后 nvidia-smi 恢复每卡独立、正确。
+  //   2) 曾改用 Dxgkrnl "GPU Adapter Memory\Dedicated Usage" 读每卡显存做覆盖，但禁用 SLI 后每卡变成独立适配器(各自 phys_0)，
+  //      该覆盖的 phys_N->index 映射失效（GPU1 的用量会并在 phys_0），故已回退 nvidia-smi 为准。若 SLI 被重新启用、又见双卡显存一样，
+  //      请禁用 SLI（而非改托盘）。
   public static string QueryCsv() {
     var psi = new ProcessStartInfo("nvidia-smi",
       "--query-gpu=index,pci.bus_id,name,memory.total,memory.used,utilization.gpu,temperature.gpu --format=csv,noheader,nounits") {
