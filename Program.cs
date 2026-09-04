@@ -25,7 +25,8 @@ public class TrayApp : ApplicationContext {
   ToolStripMenuItem? splitMenu,splitLayerItem,splitRowItem;
   ToolStripMenuItem? dshMenu,dshStatusItem,dshStartItem,dshRestartItem,dshStopItem;
   volatile int dshState=0; // DSH 服务状态：0=未启动(红) 1=启动中(黄) 2=运行中(绿)
-  long dshStartMs=0; bool dshTimeoutLogged=false,dshProbed=false; Bitmap? dotRed,dotYellow,dotGreen;
+  long dshStartMs=0; bool dshTimeoutLogged=false; Bitmap? dotRed,dotYellow,dotGreen;
+  volatile int dshPortUp=-1; int _probeBusy=0;
   LogForm? dshLogForm; long lastOutPos=0,lastErrPos=0;
   Form? popup; WebView2? wv; Form? officialForm; WebView2? officialWv;
   volatile string gpuTip=""; int gpuTick=0; volatile string cpuTemp=""; volatile string _lastTip=""; int _lastIconMs=0;
@@ -52,9 +53,9 @@ public class TrayApp : ApplicationContext {
     dshMenu=new ToolStripMenuItem("DSH");
     dshMenu.ToolTipText="DSH 服务状态：绿色=运行中、黄色=启动中、红色=未启动。可启动 / 重启 / 停止本机 DSH Web（端口 3080）";
     dshStatusItem=new ToolStripMenuItem("状态：未启动"){ Enabled=false };
-    dshStartItem=new ToolStripMenuItem("启动 DSH",null,(s,e)=>DshStart());
-    dshRestartItem=new ToolStripMenuItem("重启 DSH",null,(s,e)=>DshRestart());
-    dshStopItem=new ToolStripMenuItem("停止 DSH",null,(s,e)=>DshStop());
+    dshStartItem=new ToolStripMenuItem("启动 DSH",null,(s,e)=>Bg(()=>DshStart()));
+    dshRestartItem=new ToolStripMenuItem("重启 DSH",null,(s,e)=>Bg(()=>DshRestart()));
+    dshStopItem=new ToolStripMenuItem("停止 DSH",null,(s,e)=>Bg(()=>DshStop()));
     dshMenu.DropDownItems.Add(dshStatusItem);
     dshMenu.DropDownItems.Add(new ToolStripSeparator());
     dshMenu.DropDownItems.Add(dshStartItem); dshMenu.DropDownItems.Add(dshRestartItem); dshMenu.DropDownItems.Add(dshStopItem);
@@ -184,7 +185,7 @@ public class TrayApp : ApplicationContext {
   void StopAll(){ foreach(var s in services) Stop(s); }
   void RestartAll(){ StopAll(); foreach(var s in services) Start(s); }
 
-  bool DshUp(){ try{ using(var c=new TcpClient()){ c.Connect("127.0.0.1",3080); return true; } }catch{} return false; }
+  bool DshUp(){ try{ using(var c=new TcpClient()){ var t=c.ConnectAsync("127.0.0.1",3080); if(t.Wait(400)) return c.Connected; } }catch{} return false; } // 仅后台调用（400ms 超时）
   Bitmap Dot(Color c){ var b=new Bitmap(16,16); using(var g=Graphics.FromImage(b)){ g.SmoothingMode=System.Drawing.Drawing2D.SmoothingMode.AntiAlias; using(var br=new SolidBrush(c)) g.FillEllipse(br,2,2,12,12); } return b; }
   void RefreshDshUi(){
     if(dshMenu==null) return;
@@ -206,17 +207,17 @@ public class TrayApp : ApplicationContext {
     }
     string outLog=string.IsNullOrEmpty(cfg.DshOutLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-out.log"):cfg.DshOutLog;
     string errLog=string.IsNullOrEmpty(cfg.DshErrLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-err.log"):cfg.DshErrLog;
-    dshState=1; dshStartMs=Environment.TickCount; dshTimeoutLogged=false; RefreshDshUi();
+    dshState=1; dshStartMs=Environment.TickCount; dshTimeoutLogged=false; Ui(()=>RefreshDshUi());
     try{
       var psi=new ProcessStartInfo(cfg.DshNodeExe){ WorkingDirectory=cfg.DshWorkDir, UseShellExecute=false, CreateNoWindow=true, WindowStyle=ProcessWindowStyle.Hidden, RedirectStandardOutput=true, RedirectStandardError=true, Arguments="\""+cfg.DshCliBinJs+"\" web" };
       var p=Process.Start(psi);
-      if(p==null){ logForm.Append(">>> 启动 DSH 失败（Process.Start 返回 null）\r\n"); dshState=0; RefreshDshUi(); return; }
+      if(p==null){ logForm.Append(">>> 启动 DSH 失败（Process.Start 返回 null）\r\n"); dshState=0; Ui(()=>RefreshDshUi()); return; }
       p.OutputDataReceived+=(o,e)=>{ if(!string.IsNullOrEmpty(e.Data)){ try{ File.AppendAllText(outLog,e.Data+Environment.NewLine); }catch{} } };
       p.ErrorDataReceived+=(o,e)=>{ if(!string.IsNullOrEmpty(e.Data)){ try{ File.AppendAllText(errLog,e.Data+Environment.NewLine); }catch{} } };
       p.BeginOutputReadLine(); p.BeginErrorReadLine();
       logForm.Append(">>> 启动 DSH：\""+cfg.DshNodeExe+"\" \""+cfg.DshCliBinJs+"\" web（工作目录 "+cfg.DshWorkDir+"），等待端口 3080 就绪 ...\r\n");
       logForm.Append("    stdout→"+outLog+"\r\n    stderr→"+errLog+"\r\n");
-    }catch(Exception ex){ logForm.Append(">>> 启动 DSH 失败: "+ex.Message+"\r\n"); MessageBox.Show("启动 DSH 失败: "+ex.Message); dshState=0; RefreshDshUi(); }
+    }catch(Exception ex){ logForm.Append(">>> 启动 DSH 失败: "+ex.Message+"\r\n"); dshState=0; Ui(()=>RefreshDshUi()); Ui(()=>{ try{ MessageBox.Show("启动 DSH 失败: "+ex.Message); }catch{} }); }
   }
   bool DshKill(){
     bool killed=false;
@@ -236,7 +237,7 @@ public class TrayApp : ApplicationContext {
   void DshStop(){
     bool killed=DshKill();
     logForm.Append(killed?"停止 DSH：已终止端口 3080 监听进程（node bin.js web）\r\n":"停止 DSH：未发现运行中的 DSH（端口 3080 无监听）\r\n");
-    dshState=0; dshStartMs=0; RefreshDshUi();
+    dshState=0; dshStartMs=0; Ui(()=>RefreshDshUi());
   }
   void DshRestart(){
     logForm.Append(">>> 重启 DSH ...\r\n");
@@ -245,6 +246,9 @@ public class TrayApp : ApplicationContext {
     System.Threading.Thread.Sleep(800);
     DshStart();
   }
+  // 后台执行（菜单点启停/重启不阻塞 UI 线程）；UI 更新一律经 Ui() 回 UI 线程
+  void Bg(Action a){ try{ Task.Run(a); }catch{} }
+  void Ui(Action a){ try{ if(logForm!=null&&logForm.InvokeRequired){ logForm.BeginInvoke(a); } else a(); }catch{ try{a();}catch{} } }
   void ShowLogWin(){ try{ if(logForm==null||logForm.IsDisposed) logForm=new LogForm(); logForm.Show(); if(logForm.WindowState==FormWindowState.Minimized) logForm.WindowState=FormWindowState.Normal; logForm.BringToFront(); logForm.Activate(); }catch(Exception ex){ MessageBox.Show("打开日志窗口失败: "+ex.Message); } }
   void OpenDir(string path,string label){ try{ if(Directory.Exists(path)){ Process.Start(new ProcessStartInfo(path){UseShellExecute=true}); } else logForm.Append(label+" 目录不存在："+path+"\r\n"); }catch(Exception ex){ logForm.Append("打开 "+label+" 失败: "+ex.Message+"\r\n"); } }
   string DshProgDir(){
@@ -346,7 +350,7 @@ public class TrayApp : ApplicationContext {
       Task.Run(()=>{
         try{
           var gl=GpuInfo.Discover(); gpus=gl; gpuTip=string.Join("\n",gl.Select(g=>g.Line));
-          double t=SysInfo.CpuTemp(); cpuTemp=double.IsNaN(t)?"":t.ToString("0")+"°C";
+          double t=HwInfo.CpuTemp(); if(double.IsNaN(t)) t=SysInfo.CpuTemp(); cpuTemp=double.IsNaN(t)?"":t.ToString("0")+"°C"; // CPU 温度：HWiNFO(真) 优先 → ACPI 变化值兜底 → 无真值不显示
         }catch{}
       });
     }
@@ -358,12 +362,16 @@ public class TrayApp : ApplicationContext {
     // 只在 tooltip 内容变化、无菜单/下拉打开、且距上次至少 3s 时才更新 icon.Text（NotifyIcon.Text=Shell_NotifyIcon，频繁设置会阻塞 UI 线程）
     string tipNow = tip.TrimEnd();
     if(!menu.Visible && tipNow != _lastTip && Environment.TickCount - _lastIconMs >= 3000){ _lastTip = tipNow; _lastIconMs = Environment.TickCount; try{ icon.Text=tipNow; }catch{} }
-    // —— DSH 服务状态（每秒轮询端口 3080；绿=运行 黄=启动中 红=未启动）——
-    bool dshUpNow = DshUp();
-    if(!dshProbed){ dshProbed=true; if(dshUpNow) dshState=2; RefreshDshUi(); }
-    else if(dshUpNow){ if(dshState!=2){ dshState=2; logForm.Append("DSH 已就绪（端口 3080 监听中）\r\n"); RefreshDshUi(); } }
-    else if(dshState==2){ dshState=0; logForm.Append("DSH 已停止（端口 3080 无监听）\r\n"); RefreshDshUi(); }
-    else if(dshState==1 && Environment.TickCount-dshStartMs>90000){ if(!dshTimeoutLogged){ dshTimeoutLogged=true; logForm.Append("DSH 启动超时（90s）：端口 3080 未就绪，请查看 dsh-web-err.log\r\n"); } dshState=0; RefreshDshUi(); }
+    // —— DSH 服务状态：端口探测放后台（不阻塞 UI 线程，每秒最多一次）——
+    if(Interlocked.Exchange(ref _probeBusy,1)==0){
+      Task.Run(()=>{ try{ dshPortUp = DshUp()?1:0; } catch{} finally { Interlocked.Exchange(ref _probeBusy,0); } });
+    }
+    if(dshPortUp>=0){
+      bool dshUpNow = dshPortUp==1;
+      if(dshUpNow){ if(dshState!=2){ dshState=2; logForm.Append("DSH 已就绪（端口 3080 监听中）\r\n"); RefreshDshUi(); } }
+      else if(dshState==2){ dshState=0; logForm.Append("DSH 已停止（端口 3080 无监听）\r\n"); RefreshDshUi(); }
+      else if(dshState==1 && Environment.TickCount-dshStartMs>90000){ if(!dshTimeoutLogged){ dshTimeoutLogged=true; logForm.Append("DSH 启动超时（90s）：端口 3080 未就绪，请查看 dsh-web-err.log\r\n"); } dshState=0; RefreshDshUi(); }
+    }
     if(dshLogForm!=null&&dshLogForm.Visible) DshTailLoad(false);
     foreach(var svc in services){ long L=svc.log.Length; if(L>svc.lastLen){ string t=svc.log.ToString((int)svc.lastLen,(int)(L-svc.lastLen)); svc.lastLen=L; logForm.Append("["+svc.Name+"] "+t); } }
   }
@@ -371,7 +379,7 @@ public class TrayApp : ApplicationContext {
   void ExitApp(){ StopAll(); icon.Visible=false; if(popup!=null)popup.Close(); Application.Exit(); }
 
   // —— 隐藏自检模式：--dump-menu 打印当前菜单结构（供开发验证，不进正式 UI）——
-  public void ProbeOnce(){ bool up=DshUp(); if(!dshProbed){ dshProbed=true; if(up) dshState=2; RefreshDshUi(); } }
+  public void ProbeOnce(){ dshPortUp = DshUp()?1:0; dshState = dshPortUp==1?2:0; RefreshDshUi(); }
   public void DisposeForDump(){ try{ icon.Visible=false; icon.Dispose(); }catch{} try{ clock.Stop(); }catch{} try{ if(dshLogForm!=null){ dshLogForm.Dispose(); } }catch{} }
   public string DumpMenuText(){
     var sb=new System.Text.StringBuilder();
@@ -392,10 +400,18 @@ public class TrayApp : ApplicationContext {
 }
 
 public static class Program2 {
+  static Mutex? _single;
   [STAThread] public static void Main(string[] args){
     Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+    // 单实例互斥：开机自启双入口/重复启动时，后到者直接退出（防双托盘）
     bool dump = args!=null && args.Length>0 && args[0]=="--dump-menu";
     bool selftest = args!=null && Array.IndexOf(args,"--selftest-logwin")>=0;
+    // 单实例互斥：开机自启双入口/重复启动时后到者退出；诊断模式（--dump-menu/--selftest）不占锁
+    if(!dump && !selftest){
+      bool createdNew;
+      _single = new Mutex(true, @"Local\DSH托盘_SingleInstance", out createdNew);
+      if(!createdNew) return;
+    }
     var app=new TrayApp(dump||selftest);
     if(dump){
       app.ProbeOnce();
