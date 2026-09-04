@@ -11,9 +11,10 @@ Windows 系统托盘应用，用于管理本机 **llama.cpp** 本地大模型服
   - CPU → `-ngl 0`（关闭 flash-attn / 量化 KV）
 - **切分模式**（单选，仅多卡时生效）：按层切分 `layer`（推荐，无需 CUDA split buffers）/ 张量并行 `row`（需 split buffers 支持，用于摊开权重/KV 解锁更大上下文）。
 - **上下文长度**（单选）：8K / 16K / 32K / 64K / 128K / 192K / 256K，启动时作为 `-c` 应用。
-- **推理参数组**（单选）：通用思考 / 编码思考 / Instruct 三组官方采样参数。
+- **推理参数组**（单选）：通用思考 / 编码思考 / Instruct 三组官方采样参数；菜单标题实时显示当前组（如「推理参数组：编码思考」）。
 - **托盘悬浮（tooltip）**：每张 GPU 的 显存 GB / 占用 % / 温度 °C（nvidia-smi 每 5s 刷新）+ 运行中的模型行。
 - **打开 DSH 会话**：WebView2 嵌入 DSH Web（`http://127.0.0.1:3080/`），继承 markdown / 工具闭环 / 插件。
+- **DSH 服务控制**（菜单最顶「DSH」）：直接 启动 / 重启 / 停止本机 DSH Web（端口 3080），带状态图标（绿=运行中 / 黄=启动中 / 红=未启动），另有「查看 DSH 日志」直接打开 DSH 输出日志。
 - **打开官方会话 chat**：WebView2 打开 `https://chat.deepseek.com`，使用独立持久化用户数据目录（登录态跨重启保持）。
 
 ## 构建
@@ -39,6 +40,10 @@ dotnet publish -c Release -o publish
 | `dshUrl` | DSH Web 地址 |
 | `settingsYamlPath` | DSH `settings.yaml` 路径（打开会话时临时改写 `agent-default-model`） |
 | `officialDeepSeekUrl` | 官方会话地址 |
+| `dshNodeExe` | 启动 DSH 用的 node.exe 完整路径（「DSH」菜单 启动/重启 用） |
+| `dshCliBinJs` | DSH cli 入口，如 `<harness-checkout>\apps\cli\lib\bin.js` |
+| `dshWorkDir` | DSH 工作目录（harness checkout） |
+| `dshOutLog` / `dshErrLog` | DSH stdout/stderr 日志路径（留空 = exe 同目录 `dsh-web-out.log` / `dsh-web-err.log`） |
 | `services[]` | 每个服务的 `name/port/model/useMmproj/mmproj/batch/ubatch/specDecode/provider/enabled` |
 
 运行时状态（GPU 选择、ctx、参数组、切分模式）存 `dsh-tray.cfg`（`paramMode` / `gpu` / `ctx` / `split`），自动读写。

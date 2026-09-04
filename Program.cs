@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Management;
+using System.Net.Sockets;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -21,6 +23,9 @@ public class TrayApp : ApplicationContext {
   ToolStripMenuItem? itemOpenChat,autoStartItem; ToolStripSeparator? sepSess; ToolStripMenuItem? pm,pm0,pm1,pm2;
   ToolStripMenuItem? gpuMenu,gpuAllItem,gpuCpuItem,ctxMenu; List<(ToolStripMenuItem item,int idx)> gpuItems=new(); List<ToolStripMenuItem> ctxItems=new();
   ToolStripMenuItem? splitMenu,splitLayerItem,splitRowItem;
+  ToolStripMenuItem? dshMenu,dshStatusItem,dshStartItem,dshRestartItem,dshStopItem;
+  volatile int dshState=0; // DSH 服务状态：0=未启动(红) 1=启动中(黄) 2=运行中(绿)
+  long dshStartMs=0; bool dshTimeoutLogged=false,dshProbed=false; Bitmap? dotRed,dotYellow,dotGreen;
   Form? popup; WebView2? wv; Form? officialForm; WebView2? officialWv;
   volatile string gpuTip=""; int gpuTick=0; volatile string cpuTemp="-"; volatile string _lastTip=""; int _lastIconMs=0;
   volatile List<Gpu> gpus=new(); GpuSelection gpuSel=GpuSelection.FromCfg("all"); int ctxVal=196608;
@@ -28,7 +33,7 @@ public class TrayApp : ApplicationContext {
   int splitMode=0; // 0=按层切分 layer（多卡默认，无需 split buffers） 1=张量并行 row
   AppConfig cfg; List<Service> services=new(); List<(ToolStripMenuItem item,Service svc)> sessionItems=new(); List<(ToolStripMenuItem item,Service svc)> startItems=new();
 
-  public TrayApp(){
+  public TrayApp(bool dumpMode=false){
     cfg=Config.Load();
     foreach(var sc in cfg.Services){ if(!sc.Enabled) continue;
       var svc=new Service{Name=sc.Name,Port=sc.Port,Model=sc.Model,UseMmproj=sc.UseMmproj,Mmproj=sc.Mmproj,SpecDecode=sc.SpecDecode,Provider=sc.Provider};
@@ -39,9 +44,22 @@ public class TrayApp : ApplicationContext {
     gpuTip=string.Join("\n",gpus.Select(g=>g.Line));
     LoadCfg();
     logForm=new LogForm();
-    icon=new NotifyIcon{Icon=WhaleIcon(),Text="DSH托盘",Visible=true};
+    icon=new NotifyIcon{Icon=WhaleIcon(),Text="DSH托盘",Visible=!dumpMode};
     menu=new ContextMenuStrip();
     var items=new List<ToolStripItem>();
+    // —— DSH（本机 DSH Web 服务，端口 3080）控制：状态图标 绿=运行中 黄=启动中 红=未启动；启动/重启/停止 DSH ——
+    dshMenu=new ToolStripMenuItem("DSH");
+    dshMenu.ToolTipText="DSH 服务状态：绿色=运行中、黄色=启动中、红色=未启动。可启动 / 重启 / 停止本机 DSH Web（端口 3080）";
+    dshStatusItem=new ToolStripMenuItem("状态：未启动"){ Enabled=false };
+    dshStartItem=new ToolStripMenuItem("启动 DSH",null,(s,e)=>DshStart());
+    dshRestartItem=new ToolStripMenuItem("重启 DSH",null,(s,e)=>DshRestart());
+    dshStopItem=new ToolStripMenuItem("停止 DSH",null,(s,e)=>DshStop());
+    dshMenu.DropDownItems.Add(dshStatusItem);
+    dshMenu.DropDownItems.Add(new ToolStripSeparator());
+    dshMenu.DropDownItems.Add(dshStartItem); dshMenu.DropDownItems.Add(dshRestartItem); dshMenu.DropDownItems.Add(dshStopItem);
+    dshMenu.DropDownItems.Add(new ToolStripSeparator());
+    dshMenu.DropDownItems.Add(new ToolStripMenuItem("查看 DSH 日志",null,(s,e)=>OpenDshLog()));
+    items.Add(dshMenu); items.Add(new ToolStripSeparator());
     // 打开 DSH 会话（每服务一条，按运行态显隐）
     foreach(var s2 in services){ var it=new ToolStripMenuItem("打开 DSH 会话（"+s2.Name+"）",null,(e,a)=>OpenSession(s2)); sessionItems.Add((it,s2)); items.Add(it); }
     itemOpenChat=new ToolStripMenuItem("打开官方会话 chat",null,(s,e)=>OpenOfficial());
@@ -50,13 +68,12 @@ public class TrayApp : ApplicationContext {
     // 启动（每服务一条）
     foreach(var s2 in services){ var it=new ToolStripMenuItem("启动 "+s2.Name+" ("+s2.Port+")",null,(e,a)=>Start(s2)); startItems.Add((it,s2)); items.Add(it); }
     items.Add(new ToolStripSeparator());
-    var m4=new ToolStripMenuItem("停止所选服务",null,(s,e)=>StopSel());
     var m5=new ToolStripMenuItem("停止全部",null,(s,e)=>StopAll());
     var m6=new ToolStripMenuItem("重启全部",null,(s,e)=>RestartAll());
-    items.Add(m4); items.Add(m5); items.Add(m6);
+    items.Add(m5); items.Add(m6);
     items.Add(new ToolStripSeparator());
     // 推理参数组（radio）
-    pm=new ToolStripMenuItem("推理参数组");
+    pm=new ToolStripMenuItem("推理参数组："+ParamLabel(paramMode));
     pm0=new ToolStripMenuItem("通用思考 (temp1.0/pres1.5)",null,(s,e)=>SetParam(0));
     pm1=new ToolStripMenuItem("编码思考 (temp0.6/pres0.0)",null,(s,e)=>SetParam(1));
     pm2=new ToolStripMenuItem("Instruct (temp0.7/pres1.5)",null,(s,e)=>SetParam(2));
@@ -80,7 +97,7 @@ public class TrayApp : ApplicationContext {
     for(int i=0;i<LaunchArgs.CtxOptions.Length;i++){ int v=LaunchArgs.CtxOptions[i]; var it=new ToolStripMenuItem(ctxLabels[i],null,(s,e)=>{ ctxVal=v; RefreshChecks(); SaveCfg(); }); it.CheckOnClick=false; ctxItems.Add(it); ctxMenu.DropDownItems.Add(it); }
     items.Add(ctxMenu);
     // 多卡切分模式（单选）：按层切分 layer（推荐，无需 split buffers）/ 张量并行 row（需 CUDA split buffers 支持）
-    splitMenu=new ToolStripMenuItem("切分模式");
+    splitMenu=new ToolStripMenuItem("切分模式："+(splitMode==0?"按层切分":"张量并行"));
     splitMenu.ToolTipText="多卡部署时应用的 --split-mode：按层切分 layer=推荐（无需 split buffers）、张量并行 row=需 CUDA split buffers 支持";
     splitLayerItem=new ToolStripMenuItem("按层切分 layer（推荐）",null,(s,e)=>SetSplit(0));
     splitRowItem=new ToolStripMenuItem("张量并行 row",null,(s,e)=>SetSplit(1));
@@ -90,6 +107,7 @@ public class TrayApp : ApplicationContext {
     // 复选/单选二级菜单：点击后不隐藏（点外部/ESC 才关闭）
     KeepOpen(pm.DropDown); KeepOpen(gpuMenu.DropDown); KeepOpen(ctxMenu.DropDown); KeepOpen(splitMenu.DropDown);
     RefreshChecks();
+    RefreshDshUi();
     items.Add(new ToolStripSeparator());
     var m7=new ToolStripMenuItem("查看日志",null,(s,e)=>{logForm.Show();logForm.BringToFront();});
     var openCfg=new ToolStripMenuItem("打开配置文件",null,(s,e)=>{ try{ Process.Start(new ProcessStartInfo(Config.Path_){UseShellExecute=true}); }catch{} });
@@ -136,7 +154,10 @@ public class TrayApp : ApplicationContext {
     if(splitRowItem!=null) splitRowItem.Checked=(splitMode==1);
     if(gpuMenu!=null) gpuMenu.Text="GPU: "+gpuSel.ShortLabel();
     if(ctxMenu!=null) ctxMenu.Text="上下文: "+(ctxVal/1024)+"K";
+    if(pm!=null) pm.Text="推理参数组："+ParamLabel(paramMode);
+    if(splitMenu!=null) splitMenu.Text="切分模式："+(splitMode==0?"按层切分":"张量并行");
   }
+  static string ParamLabel(int m){ return m==0?"通用思考":m==1?"编码思考":"Instruct"; }
 
   bool PortUp(int port){ try{ using(var wc=new System.Net.WebClient()){ wc.DownloadString("http://127.0.0.1:"+port+"/health"); return true; } }catch{} return false; }
   void Start(Service svc){
@@ -157,9 +178,78 @@ public class TrayApp : ApplicationContext {
   }
 
   void Stop(Service svc){ if(svc.proc!=null&&!svc.proc.HasExited){ Log(svc,">>> 停止 "+svc.Name+" ...\r\n"); try{svc.proc.Kill();}catch{} svc.proc=null; } else Log(svc,svc.Name+" 未运行.\r\n"); }
-  void StopSel(){ string names=string.Join("/", services.Select(s=>s.Name+"("+s.Port+")")); if(MessageBox.Show("停止 "+names+"？","确认",MessageBoxButtons.YesNo)==DialogResult.Yes){ foreach(var s in services) Stop(s); } }
   void StopAll(){ foreach(var s in services) Stop(s); }
   void RestartAll(){ StopAll(); foreach(var s in services) Start(s); }
+
+  bool DshUp(){ try{ using(var c=new TcpClient()){ c.Connect("127.0.0.1",3080); return true; } }catch{} return false; }
+  Bitmap Dot(Color c){ var b=new Bitmap(16,16); using(var g=Graphics.FromImage(b)){ g.SmoothingMode=System.Drawing.Drawing2D.SmoothingMode.AntiAlias; using(var br=new SolidBrush(c)) g.FillEllipse(br,2,2,12,12); } return b; }
+  void RefreshDshUi(){
+    if(dshMenu==null) return;
+    if(dotRed==null) dotRed=Dot(Color.Firebrick);
+    if(dotYellow==null) dotYellow=Dot(Color.Goldenrod);
+    if(dotGreen==null) dotGreen=Dot(Color.ForestGreen);
+    dshMenu.Image = dshState==2?dotGreen : dshState==1?dotYellow : dotRed;
+    if(dshStatusItem!=null) dshStatusItem.Text = dshState==2?"状态：运行中" : dshState==1?"状态：启动中" : "状态：未启动";
+    if(dshStartItem!=null) dshStartItem.Enabled = dshState!=2 && dshState!=1;   // 运行/启动中禁止重复启动
+    if(dshRestartItem!=null) dshRestartItem.Enabled = true;
+    if(dshStopItem!=null) dshStopItem.Enabled = dshState!=0;                   // 未启动时停止无意义
+  }
+  void DshStart(){
+    if(DshUp()){ logForm.Append("DSH 已在运行（端口 3080 监听中）\r\n"); return; }
+    if(string.IsNullOrEmpty(cfg.DshNodeExe)||string.IsNullOrEmpty(cfg.DshCliBinJs)||string.IsNullOrEmpty(cfg.DshWorkDir)){
+      logForm.Append("未配置 DSH 启动路径：请编辑 dsh-tray-config.json（DshNodeExe / DshCliBinJs / DshWorkDir）\r\n");
+      try{ Process.Start(new ProcessStartInfo(Config.Path_){UseShellExecute=true}); }catch{}
+      return;
+    }
+    string outLog=string.IsNullOrEmpty(cfg.DshOutLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-out.log"):cfg.DshOutLog;
+    string errLog=string.IsNullOrEmpty(cfg.DshErrLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-err.log"):cfg.DshErrLog;
+    dshState=1; dshStartMs=Environment.TickCount; dshTimeoutLogged=false; RefreshDshUi();
+    try{
+      var psi=new ProcessStartInfo(cfg.DshNodeExe){ WorkingDirectory=cfg.DshWorkDir, UseShellExecute=false, CreateNoWindow=true, WindowStyle=ProcessWindowStyle.Hidden, RedirectStandardOutput=true, RedirectStandardError=true, Arguments="\""+cfg.DshCliBinJs+"\" web" };
+      var p=Process.Start(psi);
+      if(p==null){ logForm.Append(">>> 启动 DSH 失败（Process.Start 返回 null）\r\n"); dshState=0; RefreshDshUi(); return; }
+      p.OutputDataReceived+=(o,e)=>{ if(!string.IsNullOrEmpty(e.Data)){ try{ File.AppendAllText(outLog,e.Data+Environment.NewLine); }catch{} } };
+      p.ErrorDataReceived+=(o,e)=>{ if(!string.IsNullOrEmpty(e.Data)){ try{ File.AppendAllText(errLog,e.Data+Environment.NewLine); }catch{} } };
+      p.BeginOutputReadLine(); p.BeginErrorReadLine();
+      logForm.Append(">>> 启动 DSH：\""+cfg.DshNodeExe+"\" \""+cfg.DshCliBinJs+"\" web（工作目录 "+cfg.DshWorkDir+"），等待端口 3080 就绪 ...\r\n");
+      logForm.Append("    stdout→"+outLog+"\r\n    stderr→"+errLog+"\r\n");
+    }catch(Exception ex){ logForm.Append(">>> 启动 DSH 失败: "+ex.Message+"\r\n"); MessageBox.Show("启动 DSH 失败: "+ex.Message); dshState=0; RefreshDshUi(); }
+  }
+  bool DshKill(){
+    bool killed=false;
+    try{
+      var psi=new ProcessStartInfo("netstat","-ano"){UseShellExecute=false,RedirectStandardOutput=true,CreateNoWindow=true};
+      var p=Process.Start(psi);
+      if(p!=null){ string o=p.StandardOutput.ReadToEnd(); p.WaitForExit(3000);
+        foreach(var line in o.Split('\n')) if(line.Contains(":3080")&&line.Contains("LISTENING")){ var parts=line.Split(new char[]{' '},StringSplitOptions.RemoveEmptyEntries); int pid; if(parts.Length>0&&int.TryParse(parts[parts.Length-1],out pid)){ try{ Process.GetProcessById(pid).Kill(); killed=true; }catch{} } break; } }
+    }catch{}
+    try{
+      using(var searcher=new ManagementObjectSearcher("SELECT ProcessId,CommandLine FROM Win32_Process WHERE Name='node.exe'"))
+      using(var coll=searcher.Get())
+      foreach(ManagementBaseObject mo in coll){ try{ int pid=Convert.ToInt32(mo["ProcessId"]); string cl=Convert.ToString(mo["CommandLine"])??""; if(cl.Contains("bin.js")&&cl.Contains(" web")){ try{ Process.GetProcessById(pid).Kill(); killed=true; }catch{} } if(mo is IDisposable dd) dd.Dispose(); }catch{} }
+    }catch{}
+    return killed;
+  }
+  void DshStop(){
+    bool killed=DshKill();
+    logForm.Append(killed?"停止 DSH：已终止端口 3080 监听进程（node bin.js web）\r\n":"停止 DSH：未发现运行中的 DSH（端口 3080 无监听）\r\n");
+    dshState=0; dshStartMs=0; RefreshDshUi();
+  }
+  void DshRestart(){
+    logForm.Append(">>> 重启 DSH ...\r\n");
+    DshKill();
+    for(int i=0;i<20;i++){ if(!DshUp()) break; System.Threading.Thread.Sleep(500); }  // 等待端口 3080 释放
+    System.Threading.Thread.Sleep(800);
+    DshStart();
+  }
+  void OpenDshLog(){
+    string outLog=string.IsNullOrEmpty(cfg.DshOutLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-out.log"):cfg.DshOutLog;
+    string errLog=string.IsNullOrEmpty(cfg.DshErrLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-err.log"):cfg.DshErrLog;
+    bool any=false;
+    try{ if(File.Exists(outLog)){ Process.Start(new ProcessStartInfo(outLog){UseShellExecute=true}); any=true; } }catch{}
+    try{ if(File.Exists(errLog)){ Process.Start(new ProcessStartInfo(errLog){UseShellExecute=true}); any=true; } }catch{}
+    if(!any) logForm.Append("暂无 DSH 日志文件（查找 "+outLog+" / "+errLog+"）\r\n");
+  }
   void Log(Service svc,string s){ svc.log.Append(s); }
   string Short(Service s){ int i=s.Name.IndexOf(" ("); return i>0?s.Name.Substring(0,i):s.Name; }
 
@@ -234,10 +324,50 @@ public class TrayApp : ApplicationContext {
     // 只在 tooltip 内容变化、无菜单/下拉打开、且距上次至少 3s 时才更新 icon.Text（NotifyIcon.Text=Shell_NotifyIcon，频繁设置会阻塞 UI 线程）
     string tipNow = tip.TrimEnd();
     if(!menu.Visible && tipNow != _lastTip && Environment.TickCount - _lastIconMs >= 3000){ _lastTip = tipNow; _lastIconMs = Environment.TickCount; try{ icon.Text=tipNow; }catch{} }
+    // —— DSH 服务状态（每秒轮询端口 3080；绿=运行 黄=启动中 红=未启动）——
+    bool dshUpNow = DshUp();
+    if(!dshProbed){ dshProbed=true; if(dshUpNow) dshState=2; RefreshDshUi(); }
+    else if(dshUpNow){ if(dshState!=2){ dshState=2; logForm.Append("DSH 已就绪（端口 3080 监听中）\r\n"); RefreshDshUi(); } }
+    else if(dshState==2){ dshState=0; logForm.Append("DSH 已停止（端口 3080 无监听）\r\n"); RefreshDshUi(); }
+    else if(dshState==1 && Environment.TickCount-dshStartMs>90000){ if(!dshTimeoutLogged){ dshTimeoutLogged=true; logForm.Append("DSH 启动超时（90s）：端口 3080 未就绪，请查看 dsh-web-err.log\r\n"); } dshState=0; RefreshDshUi(); }
     foreach(var svc in services){ long L=svc.log.Length; if(L>svc.lastLen){ string t=svc.log.ToString((int)svc.lastLen,(int)(L-svc.lastLen)); svc.lastLen=L; logForm.Append("["+svc.Name+"] "+t); } }
   }
 
   void ExitApp(){ StopAll(); icon.Visible=false; if(popup!=null)popup.Close(); Application.Exit(); }
+
+  // —— 隐藏自检模式：--dump-menu 打印当前菜单结构（供开发验证，不进正式 UI）——
+  public void ProbeOnce(){ bool up=DshUp(); if(!dshProbed){ dshProbed=true; if(up) dshState=2; RefreshDshUi(); } }
+  public void DisposeForDump(){ try{ icon.Visible=false; icon.Dispose(); }catch{} try{ clock.Stop(); }catch{} }
+  public string DumpMenuText(){
+    var sb=new System.Text.StringBuilder();
+    sb.AppendLine("dshState="+dshState);
+    foreach(ToolStripItem it in menu.Items){
+      if(it is ToolStripSeparator){ sb.AppendLine("---"); continue; }
+      sb.AppendLine("[ "+(it.Enabled?"":"(禁用) ")+it.Text+" ]");
+      if(it is ToolStripMenuItem mi && mi.DropDownItems.Count>0){
+        if(ReferenceEquals(mi,dshMenu)) sb.AppendLine("    状态图标: "+(dshState==2?"●绿 运行中":dshState==1?"●黄 启动中":"●红 未启动"));
+        foreach(ToolStripItem sub in mi.DropDownItems){
+          if(sub is ToolStripSeparator){ sb.AppendLine("    ---"); continue; }
+          sb.AppendLine("    - "+(sub.Enabled?"":"(禁用) ")+sub.Text+((sub is ToolStripMenuItem cm&&cm.Checked)?" [勾选]":""));
+        }
+      }
+    }
+    return sb.ToString();
+  }
 }
 
-public static class Program2 { [STAThread] public static void Main(){ Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new TrayApp()); } }
+public static class Program2 {
+  [STAThread] public static void Main(string[] args){
+    Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+    bool dump = args!=null && args.Length>0 && args[0]=="--dump-menu";
+    var app=new TrayApp(dump);
+    if(dump){
+      app.ProbeOnce();
+      string txt=app.DumpMenuText();
+      try{ File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"menu-dump.txt"), txt); }catch{}
+      app.DisposeForDump();
+      return;
+    }
+    Application.Run(app);
+  }
+}

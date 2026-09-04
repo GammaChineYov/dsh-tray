@@ -25,6 +25,12 @@ public class AppConfig {
   public string DshUrl { get; set; } = "http://127.0.0.1:3080/";
   public string SettingsYamlPath { get; set; } = @"C:\Users\<you>\.dsh\settings.yaml";
   public string OfficialDeepSeekUrl { get; set; } = "https://chat.deepseek.com";
+  // DSH（本机 DSH Web 服务）控制：托盘「启动/重启/停止 DSH」用（留空则菜单仅提示配置）
+  public string DshNodeExe { get; set; } = "";   // 启动 DSH 用的 node.exe 完整路径
+  public string DshCliBinJs { get; set; } = "";  // DSH cli 入口，如 <harness-checkout>\apps\cli\lib\bin.js
+  public string DshWorkDir { get; set; } = "";   // DSH 工作目录（harness checkout）
+  public string DshOutLog { get; set; } = "";    // DSH stdout 日志（留空=exe 同目录 dsh-web-out.log）
+  public string DshErrLog { get; set; } = "";    // DSH stderr 日志（留空=exe 同目录 dsh-web-err.log）
   public List<ServiceConfig> Services { get; set; } = new List<ServiceConfig>();
 }
 
