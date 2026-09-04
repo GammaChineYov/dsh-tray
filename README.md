@@ -11,6 +11,7 @@ Windows 系统托盘应用，用于管理本机 **llama.cpp** 本地大模型服
   - CPU → `-ngl 0`（关闭 flash-attn / 量化 KV）
 - **切分模式**（单选，仅多卡时生效）：按层切分 `layer`（推荐，无需 CUDA split buffers）/ 张量并行 `row`（需 split buffers 支持，用于摊开权重/KV 解锁更大上下文）。
 - **上下文长度**（单选）：8K / 16K / 32K / 64K / 128K / 192K / 256K，启动时作为 `-c` 应用。
+- **模型监听地址**（复选，默认勾选）：勾选 = 绑定 `0.0.0.0`（局域网设备可直接访问模型端口）；取消 = 仅本机 `127.0.0.1`（llama-server 无鉴权，公网/不可信网络建议取消勾选）。下次启动服务生效。
 - **推理参数组**（单选）：通用思考 / 编码思考 / Instruct 三组官方采样参数；菜单标题实时显示当前组（如「推理参数组：编码思考」）。
 - **托盘悬浮（tooltip）**：运行中的模型行 + 每张 GPU 的 显存 GB / 占用 % / 温度 °C（nvidia-smi 每 5s）+ CPU 使用率 / 内存占用。
   - CPU 温度只在系统提供**会变化的真实读数**时显示（如 MSAcpi）；主板 ACPI 假恒温（如恒 30.1°C）会被识别并隐藏，避免显示错误数值。
@@ -48,7 +49,7 @@ dotnet publish -c Release -o publish
 | `dshOutLog` / `dshErrLog` | DSH stdout/stderr 日志路径（留空 = exe 同目录 `dsh-web-out.log` / `dsh-web-err.log`） |
 | `services[]` | 每个服务的 `name/port/model/useMmproj/mmproj/batch/ubatch/specDecode/provider/enabled` |
 
-运行时状态（GPU 选择、ctx、参数组、切分模式）存 `dsh-tray.cfg`（`paramMode` / `gpu` / `ctx` / `split`），自动读写。
+运行时状态（GPU 选择、ctx、参数组、切分模式、监听地址）存 `dsh-tray.cfg`（`paramMode` / `gpu` / `ctx` / `split` / `bind`），自动读写。
 
 > 提示：修改 `dsh-tray-config.json` 后**重启托盘**生效；托盘菜单「打开配置文件」可直接打开该文件编辑。
 

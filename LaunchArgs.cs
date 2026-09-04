@@ -64,8 +64,9 @@ public static class LaunchArgs {
 
   // 构建 llama-server 参数 + CUDA_VISIBLE_DEVICES（envCuda 为空串表示不设置）
   // splitMode: 0=按层切分 layer（多卡默认，不依赖 CUDA split buffers）；1=张量并行 row（需 split buffers 支持）
+  // bindAll: true=--host 0.0.0.0（局域网可访问，默认）；false=--host 127.0.0.1（仅本机）
   // GPU 规则：CPU→-ngl 0（去 flash-attn/量化 KV）；单卡→-ngl 99 --split-mode none；多卡→-ngl 99 --split-mode <layer|row> + --main-gpu 0
-  public static LaunchResult Build(Service svc, GpuSelection gpu, int ctx, int paramMode, int splitMode, int gpuCount) {
+  public static LaunchResult Build(Service svc, GpuSelection gpu, int ctx, int paramMode, int splitMode, int gpuCount, bool bindAll=true) {
     var r = new LaunchResult();
     var a = r.args;
     a.Add("-m"); a.Add(svc.Model);
@@ -96,7 +97,7 @@ public static class LaunchArgs {
     a.Add("--cont-batching");
     a.Add("--cache-ram"); a.Add("0");
     a.Add("--port"); a.Add(svc.Port.ToString());
-    a.Add("--host"); a.Add("0.0.0.0");
+    a.Add("--host"); a.Add(bindAll ? "0.0.0.0" : "127.0.0.1");
     a.Add("--reasoning"); a.Add("on");
     a.Add("--reasoning-format"); a.Add("deepseek");
     a.Add("--jinja");
