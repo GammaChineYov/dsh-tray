@@ -61,6 +61,9 @@ public class TrayApp : ApplicationContext {
     dshMenu.DropDownItems.Add(dshStartItem); dshMenu.DropDownItems.Add(dshRestartItem); dshMenu.DropDownItems.Add(dshStopItem);
     dshMenu.DropDownItems.Add(new ToolStripSeparator());
     dshMenu.DropDownItems.Add(new ToolStripMenuItem("查看 DSH 日志",null,(s,e)=>OpenDshLog()));
+    dshMenu.DropDownItems.Add(new ToolStripSeparator());
+    dshMenu.DropDownItems.Add(new ToolStripMenuItem("打开 DSH 程序目录",null,(s,e)=>OpenDir(DshProgDir(),"DSH 程序目录")));
+    dshMenu.DropDownItems.Add(new ToolStripMenuItem("打开 .dsh 目录",null,(s,e)=>OpenDir(DshHomeDir(),".dsh 目录")));
     items.Add(dshMenu); items.Add(new ToolStripSeparator());
     // 打开 DSH 会话（每服务一条，按运行态显隐）
     foreach(var s2 in services){ var it=new ToolStripMenuItem("打开 DSH 会话（"+s2.Name+"）",null,(e,a)=>OpenSession(s2)); sessionItems.Add((it,s2)); items.Add(it); }
@@ -113,9 +116,7 @@ public class TrayApp : ApplicationContext {
     items.Add(new ToolStripSeparator());
     var m7=new ToolStripMenuItem("查看日志",null,(s,e)=>ShowLogWin());
     var openCfg=new ToolStripMenuItem("打开配置文件",null,(s,e)=>{ try{ Process.Start(new ProcessStartInfo(Config.Path_){UseShellExecute=true}); }catch{} });
-    var openProg=new ToolStripMenuItem("打开 DSH 程序目录",null,(s,e)=>OpenDir(DshProgDir(),"DSH 程序目录"));
-    var openHome=new ToolStripMenuItem("打开 .dsh 目录",null,(s,e)=>OpenDir(DshHomeDir(),".dsh 目录"));
-    items.Add(m7); items.Add(openCfg); items.Add(openProg); items.Add(openHome); items.Add(new ToolStripSeparator());
+    items.Add(m7); items.Add(openCfg); items.Add(new ToolStripSeparator());
     autoStartItem=new ToolStripMenuItem("开机自启动",null,(s,e)=>ToggleAutoStart(autoStartItem)){CheckOnClick=true, Checked=AutoStart.Enabled()};
     autoStartItem.ToolTipText="在用户启动文件夹创建快捷方式，登录 Windows 自动运行 DSH托盘";
     items.Add(autoStartItem);
