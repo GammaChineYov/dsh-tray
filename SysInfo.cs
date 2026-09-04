@@ -38,15 +38,28 @@ public static class SysInfo {
     return (0, 0);
   }
 
-  // ---- CPU 温度（WMI ThermalZoneInformation，返回值=摄氏度*10；无则 NaN）----
+  // ---- CPU 温度：只采信"会变化的真实读数" ----
+  // 本机 i9-13900KF：WMI 只有 ACPI \_TZ.TZ00 恒值 301(30.1°C)，负载无关 → 主板假恒温，非 CPU 真温。
+  // 策略：① MSAcpi_ThermalZoneTemperature（root/wmi，K/10→°C，部分平台真读）优先；
+  //       ② Win32_PerfFormattedData_Counters_ThermalZoneInformation（cimv2）：须在 ~40s 窗口内变化 ≥0.5°C 才显示，静态假值永不显示。
+  const int TZ_WIN = 8; static readonly double[] _tzBuf = new double[TZ_WIN]; static int _tzN = 0, _tzIdx = 0;
   public static double CpuTemp() {
+    // 1) MSAcpi（真传感器优先；无实例则跳过）
     try {
-      using (var s = new ManagementObjectSearcher("SELECT Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation")) {
-        foreach (var o in s.Get()) {
-          var t = o["Temperature"];
-          if (t != null) { double v; if (double.TryParse(t.ToString(), out v)) return v / 10.0; }
-        }
-      }
+      using (var s = new ManagementObjectSearcher(new ManagementScope(@"\\.\root\wmi"), new ObjectQuery("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature")))
+      foreach (var o in s.Get()) { var t = o["CurrentTemperature"]; if (t != null) { double k; if (double.TryParse(t.ToString(), out k) && k > 2000) return k / 10.0 - 273.15; } }
+    } catch { }
+    // 2) ACPI 热区 perf：读数必须在观察窗口内变化过才认
+    try {
+      double cur = -1;
+      using (var s = new ManagementObjectSearcher("SELECT Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation"))
+      foreach (var o in s.Get()) { var t = o["Temperature"]; if (t != null) { double v; if (double.TryParse(t.ToString(), out v) && v > cur) cur = v; } }
+      if (cur < 0) return double.NaN;
+      if (_tzN < TZ_WIN) _tzBuf[_tzN++] = cur; else { _tzBuf[_tzIdx] = cur; _tzIdx = (_tzIdx + 1) % TZ_WIN; }
+      if (_tzN < 2) return double.NaN;
+      double mn = _tzBuf[0], mx = _tzBuf[0]; for (int i = 1; i < _tzN; i++) { if (_tzBuf[i] < mn) mn = _tzBuf[i]; if (_tzBuf[i] > mx) mx = _tzBuf[i]; }
+      if (mx - mn < 0.5) return double.NaN;   // ~40s 无 ≥0.5°C 变化 → 静态假值（本机恒 301）
+      return cur / 10.0;
     } catch { }
     return double.NaN;
   }

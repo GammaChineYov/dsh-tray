@@ -28,7 +28,7 @@ public class TrayApp : ApplicationContext {
   long dshStartMs=0; bool dshTimeoutLogged=false,dshProbed=false; Bitmap? dotRed,dotYellow,dotGreen;
   LogForm? dshLogForm; long lastOutPos=0,lastErrPos=0;
   Form? popup; WebView2? wv; Form? officialForm; WebView2? officialWv;
-  volatile string gpuTip=""; int gpuTick=0; volatile string cpuTemp="-"; volatile string _lastTip=""; int _lastIconMs=0;
+  volatile string gpuTip=""; int gpuTick=0; volatile string cpuTemp=""; volatile string _lastTip=""; int _lastIconMs=0;
   volatile List<Gpu> gpus=new(); GpuSelection gpuSel=GpuSelection.FromCfg("all"); int ctxVal=196608;
   int paramMode=1; // 0=通用思考 1=编码思考 2=Instruct
   int splitMode=0; // 0=按层切分 layer（多卡默认，无需 split buffers） 1=张量并行 row
@@ -346,7 +346,7 @@ public class TrayApp : ApplicationContext {
       Task.Run(()=>{
         try{
           var gl=GpuInfo.Discover(); gpus=gl; gpuTip=string.Join("\n",gl.Select(g=>g.Line));
-          double t=SysInfo.CpuTemp(); cpuTemp=double.IsNaN(t)?"-":t.ToString("0")+"°C";
+          double t=SysInfo.CpuTemp(); cpuTemp=double.IsNaN(t)?"":t.ToString("0")+"°C";
         }catch{}
       });
     }
@@ -354,7 +354,7 @@ public class TrayApp : ApplicationContext {
     foreach(var s in services) if(s.Running) tip+=Short(s)+"("+s.Port+"):"+s.State+" RAM "+s.RamGb+"\n";
     if(tip.Length==0)tip="（无运行中的模型）\n";
     tip+=gpuTip.Length>0?gpuTip:(gpus.Count>0?"GPU: 查询中":"GPU: 无");
-    tip+="\nCPU: "+cpu.ToString("0")+"% "+cpuTemp+" 内存: "+mem.usedPct.ToString("0")+"%";
+    tip+="\nCPU: "+cpu.ToString("0")+"%"+(cpuTemp.Length>0?" "+cpuTemp:"")+" 内存: "+mem.usedPct.ToString("0")+"%";
     // 只在 tooltip 内容变化、无菜单/下拉打开、且距上次至少 3s 时才更新 icon.Text（NotifyIcon.Text=Shell_NotifyIcon，频繁设置会阻塞 UI 线程）
     string tipNow = tip.TrimEnd();
     if(!menu.Visible && tipNow != _lastTip && Environment.TickCount - _lastIconMs >= 3000){ _lastTip = tipNow; _lastIconMs = Environment.TickCount; try{ icon.Text=tipNow; }catch{} }
