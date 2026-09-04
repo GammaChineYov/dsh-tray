@@ -7,6 +7,7 @@ namespace QwenTray {
 public class LaunchResult {
   public List<string> args = new List<string>();
   public string envCuda = "";
+  public string envAllreduce = "";   // 多卡张量并行(tensor)需要内置 CUDA AllReduce（GGML_CUDA_ALLREDUCE=internal）
 }
 
 // GPU 选择：CPU / 全部（GPU）/ 指定 GPUn（可多选）
@@ -52,6 +53,8 @@ public class GpuSelection {
 public static class LaunchArgs {
   // ctx 菜单选项：8k/16k/32k/64k/128k/192k/256k
   public static readonly int[] CtxOptions = { 8192, 16384, 32768, 65536, 131072, 196608, 262144 };
+  // cache-ram 菜单选项（MiB）：512M/1G/2G/4G/无限制(-1)/禁用(0)
+  public static readonly int[] CacheRamOptions = { 512, 1024, 2048, 4096, -1, 0 };
 
   // 实际生效的 GPU 列表（过滤越界索引）
   public static List<int> EffectiveGpus(GpuSelection gpu, int gpuCount) {
@@ -63,10 +66,10 @@ public static class LaunchArgs {
   }
 
   // 构建 llama-server 参数 + CUDA_VISIBLE_DEVICES（envCuda 为空串表示不设置）
-  // splitMode: 0=按层切分 layer（多卡默认，不依赖 CUDA split buffers）；1=张量并行 row（需 split buffers 支持）
+  // splitMode: 0=按层切分 layer（多卡默认，不依赖 split buffers，但双卡偶发崩）；1=张量并行 tensor（内置 AllReduce，稳定推荐）
   // bindAll: true=--host 0.0.0.0（局域网可访问，默认）；false=--host 127.0.0.1（仅本机）
   // GPU 规则：CPU→-ngl 0（去 flash-attn/量化 KV）；单卡→-ngl 99 --split-mode none；多卡→-ngl 99 --split-mode <layer|row> + --main-gpu 0
-  public static LaunchResult Build(Service svc, GpuSelection gpu, int ctx, int paramMode, int splitMode, int gpuCount, bool bindAll=true) {
+  public static LaunchResult Build(Service svc, GpuSelection gpu, int ctx, int paramMode, int splitMode, int kvMode, int cacheRam, int gpuCount, bool bindAll=true) {
     var r = new LaunchResult();
     var a = r.args;
     a.Add("-m"); a.Add(svc.Model);
@@ -83,19 +86,24 @@ public static class LaunchArgs {
       a.Add("--split-mode"); a.Add("none");
     } else {
       r.envCuda = string.Join(",", eff);
+      // 多卡张量并行(tensor)需要内置 CUDA AllReduce（Windows 无 NCCL 时用 GGML_CUDA_ALLREDUCE=internal）
+      r.envAllreduce = "internal";
       a.Add("-ngl"); a.Add("99");
-      a.Add("--split-mode"); a.Add(splitMode==1 ? "row" : "layer"); // row=张量并行(需split buffers)；layer=按层切分
+      // 张量并行 tensor(内置 AllReduce)：比 layer 稳（layer 双卡偶发崩）、比 row 能加载（row 需 split buffers，本机 MoE/mmproj 模型不支持）
+      a.Add("--split-mode"); a.Add(splitMode==1 ? "tensor" : "layer");
+      if (splitMode==1) { a.Add("-ts"); a.Add("1,1"); }
       a.Add("--main-gpu"); a.Add("0");
     }
     if (!cpu) {
       a.Add("--flash-attn"); a.Add("on");
-      a.Add("--cache-type-k"); a.Add("q8_0");
-      a.Add("--cache-type-v"); a.Add("q8_0");
+      if (kvMode == 1) { a.Add("--cache-type-k"); a.Add("q8_0"); a.Add("--cache-type-v"); a.Add("q8_0"); }      // 8bit q8_0（省显存，默认）
+      else if (kvMode == 2) { a.Add("--cache-type-k"); a.Add("f16"); a.Add("--cache-type-v"); a.Add("f16"); } // 16bit f16（显存 +约1倍）
+      // kvMode==0（默认）: 不显式指定 cache 类型，用 llama 自身默认（f16）
     }
     a.Add("-b"); a.Add(svc.Batch.ToString());
     a.Add("-ub"); a.Add(svc.Ubatch.ToString());
     a.Add("--cont-batching");
-    a.Add("--cache-ram"); a.Add("0");
+    a.Add("--cache-ram"); a.Add(cacheRam.ToString());
     a.Add("--port"); a.Add(svc.Port.ToString());
     a.Add("--host"); a.Add(bindAll ? "0.0.0.0" : "127.0.0.1");
     a.Add("--reasoning"); a.Add("on");
