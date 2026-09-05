@@ -297,7 +297,7 @@ public class TrayApp : ApplicationContext {
     if(!string.IsNullOrEmpty(cfg.DshCliBinJs)){ try{ var f=new FileInfo(cfg.DshCliBinJs); var d=f.Directory?.Parent?.Parent?.Parent; if(d!=null&&d.Exists) return d.FullName; }catch{} }
     return AppDomain.CurrentDomain.BaseDirectory;
   }
-  string DshHomeDir(){ return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh"); }
+  string DshHomeDir(){ if(!string.IsNullOrEmpty(cfg.DshHomeDir)) return cfg.DshHomeDir; return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh"); }
   string DshOutPath(){ return string.IsNullOrEmpty(cfg.DshOutLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-out.log"):cfg.DshOutLog; }
   string DshErrPath(){ return string.IsNullOrEmpty(cfg.DshErrLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-err.log"):cfg.DshErrLog; }
   public void OpenDshLog(){

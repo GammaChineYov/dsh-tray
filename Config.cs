@@ -31,6 +31,7 @@ public class AppConfig {
   public string DshWorkDir { get; set; } = "";   // DSH 工作目录（harness checkout）
   public string DshOutLog { get; set; } = "";    // DSH stdout 日志（留空=exe 同目录 dsh-web-out.log）
   public string DshErrLog { get; set; } = "";    // DSH stderr 日志（留空=exe 同目录 dsh-web-err.log）
+  public string DshHomeDir { get; set; } = "";    // 用户 .dsh 目录（留空=默认 %USERPROFILE%\.dsh；本机 DSH_HOME 非默认时填真实值）
   public List<ServiceConfig> Services { get; set; } = new List<ServiceConfig>();
 }
 

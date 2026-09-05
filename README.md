@@ -47,6 +47,7 @@ dotnet publish -c Release -o publish
 | `dshNodeExe` | 启动 DSH 用的 node.exe 完整路径（「DSH」菜单 启动/重启 用） |
 | `dshCliBinJs` | DSH cli 入口，如 `<harness-checkout>\apps\cli\lib\bin.js` |
 | `dshWorkDir` | DSH 工作目录（harness checkout） |
+| `dshHomeDir` | `.dsh` 目录（托盘「打开 .dsh 目录」用；留空 = 默认 `%USERPROFILE%\.dsh`，DSH_HOME 非默认时填真实路径） |
 | `dshOutLog` / `dshErrLog` | DSH stdout/stderr 日志路径（留空 = exe 同目录 `dsh-web-out.log` / `dsh-web-err.log`） |
 | `services[]` | 每个服务的 `name/port/model/useMmproj/mmproj/batch/ubatch/specDecode/provider/enabled` |
 
