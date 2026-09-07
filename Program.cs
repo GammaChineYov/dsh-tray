@@ -32,13 +32,24 @@ public class TrayApp : ApplicationContext {
   volatile int dshPortUp=-1; int _probeBusy=0;
   LogForm? dshLogForm; long lastOutPos=0,lastErrPos=0;
   Form? popup; WebView2? wv; Form? officialForm; WebView2? officialWv;
+  bool _popupLogged; string _pendingAfterLogin=""; // dsh web 弹窗登录态与待跳转目标（先 token 登录种 cookie 再续跳）
+  int _popW=1080,_popH=760,_offW=1100,_offH=760; // 会话弹窗 / 官方弹窗默认尺寸（用户调整后记忆到 cfg）
+  int _popX=int.MinValue,_popY=int.MinValue,_offX=int.MinValue,_offY=int.MinValue; // 弹窗上次位置（int.MinValue=未记录 → 首次居中）
+  System.Windows.Forms.Timer? _posSaveTimer; Action? _posSaveAct; // 位置/大小保存防抖
   volatile string gpuTip=""; int gpuTick=0; volatile string cpuTemp=""; volatile string _lastTip=""; int _lastIconMs=0;
   volatile List<Gpu> gpus=new(); GpuSelection gpuSel=GpuSelection.FromCfg("all"); int ctxVal=196608;
   int paramMode=1; // 0=通用思考 1=编码思考 2=Instruct
   int splitMode=1; // 0=按层切分 layer（双卡偶发崩，不推荐） 1=张量并行 tensor（内置 AllReduce，稳定推荐，默认）
   int kvMode=1;    // KV 缓存类型：0=默认(llama默认f16) 1=q8_0(8bit,省显存) 2=f16(16bit)
   int cacheRam=0;   // llama-server -cram/--cache-ram（prompt/前缀缓存占系统内存上限，MiB；0=禁用、-1=无限制）
+  int tsGpu1=50;  // 张量并行比例：GPU1 占比%（0-100，默认50=均分；越大 GPU1 分越多，方便给 GPU0/Unity 腾显存）
   AppConfig cfg; List<Service> services=new(); List<(ToolStripMenuItem item,Service svc)> sessionItems=new(); List<(ToolStripMenuItem item,Service svc)> startItems=new();
+  // —— 最近会话（DSH 二级菜单：最近发消息的未归档会话；后台读 .dsh/storages，点击=弹窗 ?session= 直达）——
+  ToolStripMenuItem? recentHeader; List<RecentSession> recentList=new(); int recentBusy=0; long recentRefreshMs=0;
+  static readonly DateTime UNIX_EPOCH=new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc);
+  // 采集缓存：JSON 文件 mtime 未变则复用解析结果，避免每次全量读+防病毒扫描拖慢右键/启动
+  long _wsMt; HashSet<string> _archCache=new();
+  Dictionary<string,(long mt,string title,long last,long created,string cwd)> _sessCache=new();
 
   public TrayApp(bool dumpMode=false){
     cfg=Config.Load();
@@ -69,6 +80,11 @@ public class TrayApp : ApplicationContext {
     dshMenu.DropDownItems.Add(new ToolStripSeparator());
     dshMenu.DropDownItems.Add(new ToolStripMenuItem("打开 DSH 程序目录",null,(s,e)=>OpenDir(DshProgDir(),"DSH 程序目录")));
     dshMenu.DropDownItems.Add(new ToolStripMenuItem("打开 .dsh 目录",null,(s,e)=>OpenDir(DshHomeDir(),".dsh 目录")));
+    // 最近会话（动态重建，见 RebuildRecentMenu；点击=弹窗导航 ?session=<id>）
+    dshMenu.DropDownItems.Add(new ToolStripSeparator());
+    recentHeader=new ToolStripMenuItem("最近会话"){Enabled=false};
+    dshMenu.DropDownItems.Add(recentHeader);
+    dshMenu.DropDownItems.Add(new ToolStripMenuItem("（读取中…）"){Enabled=false});
     items.Add(dshMenu); items.Add(new ToolStripSeparator());
     // 打开 DSH 会话（每服务一条，按运行态显隐）
     foreach(var s2 in services){ var it=new ToolStripMenuItem("打开 DSH 会话（"+s2.Name+"）",null,(e,a)=>OpenSession(s2)); sessionItems.Add((it,s2)); items.Add(it); }
@@ -128,6 +144,13 @@ public class TrayApp : ApplicationContext {
     splitRowItem=new ToolStripMenuItem("张量并行 tensor（推荐，内置 AllReduce）",null,(s,e)=>SetSplit(1));
     splitLayerItem.CheckOnClick=false; splitRowItem.CheckOnClick=false;
     splitMenu.DropDownItems.AddRange(new ToolStripItem[]{splitLayerItem,splitRowItem});
+    // 张量并行比例滑块（GPU1 占比%）：仅张量并行生效，拖拽=调整 -ts，重启对应服务后应用
+    splitMenu.DropDownItems.Add(new ToolStripSeparator());
+    var tsLabel=new ToolStripMenuItem("GPU1 占比: "+tsGpu1+"%（张量并行）"){Enabled=false};
+    splitMenu.DropDownItems.Add(tsLabel);
+    var tsBar=new TrackBar{Minimum=10,Maximum=90,Value=tsGpu1,TickFrequency=10,SmallChange=5,LargeChange=10,Width=180,Height=26,AutoSize=false};
+    tsBar.ValueChanged+=(s,e)=>{ tsGpu1=tsBar.Value; tsLabel.Text="GPU1 占比: "+tsGpu1+"%（张量并行）"; SaveCfg(); };
+    splitMenu.DropDownItems.Add(new ToolStripControlHost(tsBar));
     items.Add(splitMenu);
     // 模型监听地址（复选）：勾选=--host 0.0.0.0 局域网可访问（默认）；取消=--host 127.0.0.1 仅本机（下次启动服务生效）
     bindItem=new ToolStripMenuItem("模型监听 0.0.0.0（局域网可访问）",null,(s,e)=>ToggleBind());
@@ -145,10 +168,29 @@ public class TrayApp : ApplicationContext {
     autoStartItem=new ToolStripMenuItem("开机自启动",null,(s,e)=>ToggleAutoStart(autoStartItem)){CheckOnClick=true, Checked=AutoStart.Enabled()};
     autoStartItem.ToolTipText="在用户启动文件夹创建快捷方式，登录 Windows 自动运行 DSH托盘";
     items.Add(autoStartItem);
+    var m8r=new ToolStripMenuItem("重启托盘",null,(s,e)=>RestartTray());
+    items.Add(m8r);
     var m8=new ToolStripMenuItem("退出",null,(s,e)=>ExitApp());
     items.Add(m8);
     menu.Items.AddRange(items.ToArray());
-    icon.ContextMenuStrip=menu; icon.DoubleClick+=(s,e)=>OpenPop();
+    // 右键菜单：NotifyIcon 内置弹出（位置由系统提供，规避手动 Show 在本机 DPI 下的坐标越界）。
+    // 必须配 Main 里 SetHighDpiMode(PerMonitorV2)；约束：菜单显示期间绝不重建 DropDownItems（RebuildRecentMenu 有守卫）。
+    icon.ContextMenuStrip=menu;
+    icon.DoubleClick+=(s,e)=>OpenPop();
+    icon.MouseUp+=(s,e)=>{ if(e.Button!=MouseButtons.Right) return;
+      if(menu==null) return;
+      if(menu.Visible){ // 幽灵菜单防御：Visible=true 但不在任何工作屏（曾被弹到不可见位置且未关）→ 清掉，让内置 Show 下次弹到系统位置
+        var b=menu.Bounds; bool onScreen=false;
+        try{ foreach(var sc in Screen.AllScreens) if(sc.WorkingArea.IntersectsWith(b)){ onScreen=true; break; } }catch{}
+        if(!onScreen&&b.Width>0&&b.Height>0){ try{ menu.Close(); }catch{} try{ File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"tray-ex.log"),DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+" GHOSTCLR "+b+"\r\n"); }catch{} }
+      }
+    };
+    recentRefreshMs=Environment.TickCount-54000; // 首次采集错峰：启动约 6s 后，避开图标注册/explorer 拥挤（启动瞬间右键必须即时可用）
+    if(dumpMode){ try{ recentList=ReadRecent(); RebuildRecentMenu(); }catch{} } // 诊断模式同步填充，供 --dump-menu 核对
+    else{ menu.Closed+=(s,e)=>RebuildRecentMenu(); } // 采集完全交给 Tick 低频；Closed 仅内存快照重建（无 IO）
+    // 通知区冷启动右键修复（A/B 证实必要：去掉后重启托盘右键须等很久才有反应）：
+    // explorer 对刚 NIM_ADD 的图标建立右键路由很慢 → 启动 ~2.5s 重注册一次（delete+add）强制绑定，右键随即可用。
+    if(!dumpMode){ var rr=new System.Windows.Forms.Timer(); rr.Interval=2500; rr.Tick+=(s,e)=>{ rr.Stop(); rr.Dispose(); try{ icon.Visible=false; icon.Visible=true; }catch{} }; rr.Start(); }
     clock=new System.Windows.Forms.Timer(); clock.Interval=1000; clock.Tick+=(s,e)=>Tick(); clock.Start();
   }
 
@@ -159,12 +201,31 @@ public class TrayApp : ApplicationContext {
       else if(l.StartsWith("gpu=")) gpuSel=GpuSelection.FromCfg(l.Substring(4));
       else if(l.StartsWith("ctx=")){ int v; if(int.TryParse(l.Substring(4),out v)&&Array.IndexOf(LaunchArgs.CtxOptions,v)>=0) ctxVal=v; }
       else if(l.StartsWith("split=")){ string s2=l.Substring(6).Trim().ToLowerInvariant(); splitMode = (s2=="tensor"||s2=="row") ? 1 : 0; } // row=旧值兼容
+      else if(l.StartsWith("tsGpu1=")){ int v; if(int.TryParse(l.Substring(7),out v)&&v>=0&&v<=100) tsGpu1=v; }
       else if(l.StartsWith("kv=")){ int m; if(int.TryParse(l.Substring(3),out m)&&m>=0&&m<=2) kvMode=m; }
       else if(l.StartsWith("cacheRam=")){ int v; if(int.TryParse(l.Substring(9),out v)&&Array.IndexOf(LaunchArgs.CacheRamOptions,v)>=0) cacheRam=v; }
       else if(l.StartsWith("bind=")){ string s2=l.Substring(5).Trim().ToLowerInvariant(); bindAll = (s2!="127.0.0.1" && s2!="local" && s2!="0"); } // 缺省/未知一律按 0.0.0.0（兼容旧 cfg 无 bind 键）
+      else if(l.StartsWith("popW=")){ int v; if(int.TryParse(l.Substring(5),out v)&&v>=400&&v<=6000) _popW=v; }
+      else if(l.StartsWith("popH=")){ int v; if(int.TryParse(l.Substring(5),out v)&&v>=300&&v<=6000) _popH=v; }
+      else if(l.StartsWith("offW=")){ int v; if(int.TryParse(l.Substring(5),out v)&&v>=400&&v<=6000) _offW=v; }
+      else if(l.StartsWith("offH=")){ int v; if(int.TryParse(l.Substring(5),out v)&&v>=300&&v<=6000) _offH=v; }
+      else if(l.StartsWith("popX=")){ int v; if(int.TryParse(l.Substring(5),out v)) _popX=v; }
+      else if(l.StartsWith("popY=")){ int v; if(int.TryParse(l.Substring(5),out v)) _popY=v; }
+      else if(l.StartsWith("offX=")){ int v; if(int.TryParse(l.Substring(5),out v)) _offX=v; }
+      else if(l.StartsWith("offY=")){ int v; if(int.TryParse(l.Substring(5),out v)) _offY=v; }
     } }catch{}
   }
-  void SaveCfg(){ try{ File.WriteAllText(Cfg(),"paramMode="+paramMode+"\r\ngpu="+gpuSel.CfgString()+"\r\nctx="+ctxVal+"\r\nsplit="+(splitMode==0?"layer":"tensor")+"\r\nkv="+kvMode+"\r\ncacheRam="+cacheRam+"\r\nbind="+(bindAll?"0.0.0.0":"127.0.0.1")+"\r\n"); }catch{} }
+  void SaveCfg(){ try{ File.WriteAllText(Cfg(),"paramMode="+paramMode+"\r\ngpu="+gpuSel.CfgString()+"\r\nctx="+ctxVal+"\r\nsplit="+(splitMode==0?"layer":"tensor")+"\r\ntsGpu1="+tsGpu1+"\r\nkv="+kvMode+"\r\ncacheRam="+cacheRam+"\r\nbind="+(bindAll?"0.0.0.0":"127.0.0.1")+"\r\npopX="+_popX+"\r\npopY="+_popY+"\r\npopW="+_popW+"\r\npopH="+_popH+"\r\noffX="+_offX+"\r\noffY="+_offY+"\r\noffW="+_offW+"\r\noffH="+_offH+"\r\n"); }catch{} }
+  // 弹窗位置/大小持久化：Move/ResizeEnd 都触发，防抖 600ms 写盘一次
+  void QueueSavePos(){ _posSaveAct=SaveAllPos; if(_posSaveTimer==null){ _posSaveTimer=new System.Windows.Forms.Timer(); _posSaveTimer.Interval=600; _posSaveTimer.Tick+=(s,e)=>{ _posSaveTimer.Stop(); var a=_posSaveAct; _posSaveAct=null; if(a!=null) try{ a(); }catch{} }; } _posSaveTimer.Stop(); _posSaveTimer.Start(); }
+  void SaveAllPos(){
+    try{
+      if(popup!=null&&!popup.IsDisposed&&popup.WindowState==FormWindowState.Normal){ _popX=popup.Location.X; _popY=popup.Location.Y; _popW=popup.Width; _popH=popup.Height; }
+      if(officialForm!=null&&!officialForm.IsDisposed&&officialForm.WindowState==FormWindowState.Normal){ _offX=officialForm.Location.X; _offY=officialForm.Location.Y; _offW=officialForm.Width; _offH=officialForm.Height; }
+      SaveCfg();
+    }catch{}
+  }
+  bool PosOnScreen(Point p){ try{ foreach(var sc in Screen.AllScreens) if(sc.WorkingArea.Contains(p)) return true; }catch{} return false; }
   void ToggleAutoStart(ToolStripMenuItem it){ AutoStart.Set(it.Checked); it.Checked=AutoStart.Enabled(); }
   void SetParam(int m){ paramMode=m; RefreshChecks(); SaveCfg(); string label=m==0?"通用思考 (temp1.0/pres1.5)":m==1?"编码思考 (temp0.6/pres0.0)":"Instruct (temp0.7/pres1.5)"; logForm.Append("推理参数组: "+label+"（重启对应服务后生效）\r\n"); }
   void SetSplit(int m){ splitMode=m; RefreshChecks(); SaveCfg(); logForm.Append("切分模式: "+(m==0?"按层切分 layer":"张量并行 tensor")+"（重启对应服务后生效）\r\n"); }
@@ -197,7 +258,7 @@ public class TrayApp : ApplicationContext {
     if(gpuMenu!=null) gpuMenu.Text="GPU: "+gpuSel.ShortLabel();
     if(ctxMenu!=null) ctxMenu.Text="上下文: "+(ctxVal/1024)+"K";
     if(pm!=null) pm.Text="推理参数组："+ParamLabel(paramMode);
-    if(splitMenu!=null) splitMenu.Text="切分模式："+(splitMode==0?"按层切分":"张量并行");
+    if(splitMenu!=null) splitMenu.Text="切分模式："+(splitMode==0?"按层切分":"张量并行("+tsGpu1+"%)");
     if(kvMenu!=null) kvMenu.Text="KV 缓存: "+KvLabel(kvMode);
     if(cacheRamMenu!=null) cacheRamMenu.Text="缓存内存: "+CacheRamLabel(cacheRam);
   }
@@ -207,17 +268,20 @@ public class TrayApp : ApplicationContext {
   void Start(Service svc){
     if(svc.Running){ Log(svc,svc.Name+" 已在运行 (端口 "+svc.Port+")\r\n"); return; }
     if(PortUp(svc.Port)){ Log(svc,"端口 "+svc.Port+" 已有服务在跑（非本应用启动），请先停用外部进程。\r\n"); return; }
-    var build=LaunchArgs.Build(svc,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,gpus.Count,bindAll);
+    var build=LaunchArgs.Build(svc,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll);
     var psi=new ProcessStartInfo(cfg.LlamaServerExe,string.Join(" ",build.args)){UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true,CreateNoWindow=true};
     if(build.envCuda.Length>0) psi.Environment["CUDA_VISIBLE_DEVICES"]=build.envCuda;
     if(build.envAllreduce.Length>0) psi.Environment["GGML_CUDA_ALLREDUCE"]=build.envAllreduce; // 多卡张量并行需要内置 CUDA AllReduce
     try{
       svc.proc=Process.Start(psi); svc.proc.OutputDataReceived+=(o,e)=>{if(e.Data!=null)svc.log.AppendLine(e.Data);}; svc.proc.ErrorDataReceived+=(o,e)=>{if(e.Data!=null)svc.log.AppendLine("[err] "+e.Data);}; svc.proc.BeginOutputReadLine(); svc.proc.BeginErrorReadLine();
       Log(svc,">>> 启动 "+svc.Name+" (端口 "+svc.Port+")\r\n");
-      Log(svc,"    GPU="+gpuSel.Describe(gpus)+" | ctx="+(ctxVal/1024)+"K | CUDA_VISIBLE_DEVICES="+(build.envCuda.Length>0?build.envCuda:"-")+" | 参数组="+(paramMode==0?"通用思考":paramMode==1?"编码思考":"Instruct")+" | 切分="+(splitMode==0?"按层 layer":splitMode==1?"张量并行 tensor":"-")+" | KV="+KvLabel(kvMode)+" | 缓存内存="+CacheRamLabel(cacheRam)+" | 监听="+(bindAll?"0.0.0.0":"127.0.0.1")+"\r\n");
+      Log(svc,"    GPU="+gpuSel.Describe(gpus)+" | ctx="+(ctxVal/1024)+"K | CUDA_VISIBLE_DEVICES="+(build.envCuda.Length>0?build.envCuda:"-")+" | 参数组="+(paramMode==0?"通用思考":paramMode==1?"编码思考":"Instruct")+" | 切分="+(splitMode==0?"按层 layer":splitMode==1?"张量并行 tensor("+tsGpu1+"%)":"-")+" | KV="+KvLabel(kvMode)+" | 缓存内存="+CacheRamLabel(cacheRam)+" | MTP="+(svc.SpecDecode?"on":"off")+" | 监听="+(bindAll?"0.0.0.0":"127.0.0.1")+"\r\n");
       if(gpuSel.UseCpu) Log(svc,"    注意: CPU 模式（-ngl 0），速度会显著变慢\r\n");
       else if(ctxVal>=196608 && LaunchArgs.EffectiveGpus(gpuSel,gpus.Count).Count==1 && (svc.Model.Contains("35B")||svc.Model.Contains("27B"))) Log(svc,"    注意: "+(ctxVal/1024)+"K 上下文 + 单 GPU 可能显存不足（OOM），建议 GPU=全部（多卡，切分模式=按层 layer）或降低 ctx\r\n");
       Log(svc,"    首次加载约 30-60s\r\n");
+      string cmdLine = cfg.LlamaServerExe + " " + string.Join(" ", build.args) + (build.envCuda.Length>0?" [CUDA_VISIBLE_DEVICES="+build.envCuda+"]":"") + (build.envAllreduce.Length>0?" [GGML_CUDA_ALLREDUCE="+build.envAllreduce+"]":"");
+      Log(svc,"    命令: "+cmdLine+"\r\n");
+      try{ File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"model-start.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+" ["+svc.Name+"] "+cmdLine+"\r\n"); }catch{}
     }
     catch(Exception ex){ Log(svc,">>> 启动 "+svc.Name+" 失败: "+ex.Message+"\r\n"); }
   }
@@ -345,22 +409,121 @@ public class TrayApp : ApplicationContext {
     OpenPop();
     if(orig!=null){ var rt=new System.Windows.Forms.Timer(); rt.Interval=8000; rt.Tick+=(s,e)=>{ try{ File.WriteAllText(yp, ReplaceBlock(File.ReadAllText(yp), orig)); }catch{} rt.Stop(); rt.Dispose(); }; rt.Start(); }
   }
-  void OpenPop(){
-    try{
-      if(popup==null || popup.IsDisposed){
-        popup=new Form{Text="DSH托盘",Icon=WhaleIcon(),FormBorderStyle=FormBorderStyle.SizableToolWindow,StartPosition=FormStartPosition.CenterScreen,Size=new Size(460,640),ShowInTaskbar=false,MinimizeBox=true};
-        popup.FormClosing+=(s,e)=>{ if(e.CloseReason==CloseReason.UserClosing){ e.Cancel=true; popup.Hide(); } };
-        wv=new WebView2{Dock=DockStyle.Fill}; popup.Controls.Add(wv);
-        popup.Shown+=(s,e)=>{ try{ wv.Source=new Uri(cfg.DshUrl); }catch{} };
-      }
-      popup.Show(); popup.Activate(); if(popup.WindowState==FormWindowState.Minimized) popup.WindowState=FormWindowState.Normal;
-    }catch(Exception ex){ MessageBox.Show("打开会话失败: "+ex.Message); }
+  void OpenPop(){ EnsurePopupNav(cfg.DshUrl,false); }
+  void OpenSessionById(string sessionId){ try{ EnsurePopupNav(BuildSessionUrl(sessionId),true); }catch(Exception ex){ MessageBox.Show("打开会话失败: "+ex.Message); } }
+  string BuildSessionUrl(string sessionId){ var ub=new UriBuilder(cfg.DshUrl); ub.Query="session="+Uri.EscapeDataString(sessionId); return ub.Uri.ToString(); }
+  string TokenUrl(){ var ub=new UriBuilder(cfg.DshUrl); ub.Query="token="+Uri.EscapeDataString(cfg.DshWebToken??""); return ub.Uri.ToString(); }
+  // 弹窗导航：dsh web 需要登录。首次/登录态未知且已配置 DshWebToken 时，先导航 token URL 种 cookie，
+  // 完成后由 NavigationCompleted 续跳到真正目标，避免带 ?session 裸跳遇 401。
+  void EnsurePopupNav(string url,bool force){
+    bool created=false;
+    if(popup==null || popup.IsDisposed){
+      created=true;
+      popup=new Form{Text="DSH托盘",Icon=WhaleIcon(),FormBorderStyle=FormBorderStyle.SizableToolWindow,StartPosition=FormStartPosition.CenterScreen,Size=new Size(_popW,_popH),ShowInTaskbar=false,MinimizeBox=true};
+      if(_popX!=int.MinValue&&PosOnScreen(new Point(_popX+_popW/2,_popY+20))){ popup.StartPosition=FormStartPosition.Manual; popup.Location=new Point(_popX,_popY); } // 记住上次位置；已移出屏幕则居中
+      popup.FormClosing+=(s,e)=>{ if(e.CloseReason==CloseReason.UserClosing){ e.Cancel=true; popup.Hide(); } };
+      popup.ResizeEnd+=(s,e)=>QueueSavePos();
+      popup.Move+=(s,e)=>QueueSavePos();
+      wv=new WebView2{Dock=DockStyle.Fill}; popup.Controls.Add(wv);
+      wv.NavigationCompleted+=(s,e)=>{ if(!string.IsNullOrEmpty(_pendingAfterLogin)){ var u=_pendingAfterLogin; _pendingAfterLogin=""; try{ wv.Source=new Uri(u); }catch{} } };
+    }
+    popup.Show(); popup.Activate(); if(popup.WindowState==FormWindowState.Minimized) popup.WindowState=FormWindowState.Normal;
+    bool hasToken=!string.IsNullOrEmpty(cfg.DshWebToken);
+    bool needLogin=(created||force)&&hasToken&&!_popupLogged;
+    if(needLogin){ _pendingAfterLogin=url; try{ wv.Source=new Uri(TokenUrl()); }catch{} }
+    else if(created||force){ try{ wv.Source=new Uri(url); }catch{} }
+    if(hasToken) _popupLogged=true;
   }
+  // —— 最近会话：读 .dsh/storages 明文投影（免解压 zstd），按 max(createdAt,lastPromptAt) 倒序、排除归档取前 10 ——
+  void ScheduleRecentRefresh(){
+    if(Interlocked.Exchange(ref recentBusy,1)!=0) return;
+    Task.Run(()=>{
+      try{ var list=ReadRecent(); Ui(()=>{ recentList=list; RebuildRecentMenu(); }); }
+      catch{} finally{ Interlocked.Exchange(ref recentBusy,0); }
+    });
+  }
+  string StoragesDir(){ return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh", "storages"); }
+  List<RecentSession> ReadRecent(){
+    var found=new List<RecentSession>();
+    try{
+      string dir=StoragesDir();
+      // 归档集合：workspace.json 实时缓存（mtime 未变不重解析）
+      var archived=_archCache;
+      try{ string wsPath=Path.Combine(dir,"workspace.json"); if(File.Exists(wsPath)){
+          long mt=File.GetLastWriteTimeUtc(wsPath).Ticks;
+          if(mt!=_wsMt){ _wsMt=mt; _archCache=new HashSet<string>();
+            using(var doc=System.Text.Json.JsonDocument.Parse(File.ReadAllText(wsPath))){ var r=doc.RootElement;
+              if(r.TryGetProperty("global",out var g)&&g.TryGetProperty("archivedSessionIds",out var a)) foreach(var x in a.EnumerateArray()){ var s=x.GetString(); if(s!=null) _archCache.Add(s); } } }
+          archived=_archCache; } }catch{}
+      // 权威会话源：storages/session_projcache/sessions/<id>.json（per-session 实时投影，含标题与最后消息时间）。
+      // 文件 mtime 未变则不重读（只 stat），避免每轮全读触发防病毒扫描拖慢系统。
+      string pdir=Path.Combine(dir,"session_projcache","sessions");
+      if(Directory.Exists(pdir)){
+        var cur=new HashSet<string>();
+        foreach(var f in Directory.EnumerateFiles(pdir,"*.json")){
+          string id=Path.GetFileNameWithoutExtension(f); cur.Add(id);
+          long mt=File.GetLastWriteTimeUtc(f).Ticks;
+          if(!_sessCache.TryGetValue(id,out var c)||c.mt!=mt) _sessCache[id]=ReadProjRecord(f,mt);
+        }
+        if(_sessCache.Count!=cur.Count){ var dead=new List<string>(); foreach(var k in _sessCache.Keys) if(!cur.Contains(k)) dead.Add(k); foreach(var k in dead) _sessCache.Remove(k); }
+        foreach(var kv in _sessCache){
+          if(archived.Contains(kv.Key)) continue;
+          var c=kv.Value;
+          found.Add(new RecentSession{Id=kv.Key,Title=c.title,Cwd=c.cwd,Last=Math.Max(c.last,c.created)});
+        }
+      }
+      found.Sort((a,b)=>b.Last.CompareTo(a.Last));
+      if(found.Count>10) found=found.GetRange(0,10);
+    }catch{}
+    return found;
+  }
+  // 读单个 per-session 投影：record.identity.{createdAt,cwd} + record.rows.{title.val, sessionListMetadata.val.lastPromptAt}
+  (long mt,string title,long last,long created,string cwd) ReadProjRecord(string f,long mt){
+    string title=""; long last=0,created=0; string cwd="";
+    try{
+      using(var doc=System.Text.Json.JsonDocument.Parse(File.ReadAllText(f))){ var root=doc.RootElement;
+        if(!root.TryGetProperty("record",out var rec)) return (mt,title,last,created,cwd);
+        if(rec.TryGetProperty("identity",out var idt)){ if(idt.TryGetProperty("createdAt",out var ca)){ try{created=ca.GetInt64();}catch{} } if(idt.TryGetProperty("cwd",out var cw)) cwd=cw.GetString()??""; }
+        if(rec.TryGetProperty("rows",out var rows)){
+          if(rows.TryGetProperty("title",out var tt)&&tt.TryGetProperty("val",out var tv)&&tv.ValueKind==System.Text.Json.JsonValueKind.String) title=tv.GetString()??"";
+          if(rows.TryGetProperty("sessionListMetadata",out var slm)&&slm.TryGetProperty("val",out var sv)&&sv.TryGetProperty("lastPromptAt",out var lp)){ try{last=lp.GetInt64();}catch{} }
+        }
+      }
+    }catch{}
+    return (mt,title,last,created,cwd);
+  }
+  // 菜单动态内容唯一重建入口（模式）：读内存快照 recentList，仅菜单不可见时同步重建，零磁盘/零网络。
+  // 触发只能来自：采集完成回调 / menu.Closed（都保证菜单不可见）；严禁在 Opening/显示期间调用或做慢 IO。
+  void RebuildRecentMenu(){
+    if(menu==null||dshMenu==null||recentHeader==null) return;
+    if(menu.Visible) return; // 核心守卫：显示中绝不动结构（RemoveAt/Insert 会静默破坏弹出），交给下次 Closed/采集回调
+    int idx=dshMenu.DropDownItems.IndexOf(recentHeader); if(idx<0) return;
+    while(dshMenu.DropDownItems.Count>idx+1) dshMenu.DropDownItems.RemoveAt(idx+1);
+    var list=recentList;
+    if(list==null||list.Count==0){ dshMenu.DropDownItems.Insert(idx+1,new ToolStripMenuItem("（暂无未归档会话）"){Enabled=false}); return; }
+    for(int i=0;i<list.Count;i++){ var rr=list[i];
+      var it=new ToolStripMenuItem(RecentLabel(rr),null,(s,e)=>OpenSessionById(rr.Id));
+      it.ToolTipText=(rr.Cwd.Length>0?("工作区: "+rr.Cwd+"\r\n"):"")+"会话: "+rr.Id;
+      dshMenu.DropDownItems.Insert(idx+1+i,it);
+    }
+  }
+  string RecentLabel(RecentSession r){
+    string t=r.Title; if(string.IsNullOrWhiteSpace(t)){ t="(无标题 "+ShortId(r.Id)+")"; }
+    else if(t.Length>26) t=t.Substring(0,26)+"…";
+    if(r.Last<=0) return t;
+    long diff=Math.Max(0,DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()-r.Last);
+    string rel = diff<60_000? "刚刚" : diff<3_600_000? (diff/60_000)+"分钟前" : diff<86_400_000? (diff/3_600_000)+"小时前" : (diff/86_400_000)+"天前";
+    return t+"  ·  "+rel;
+  }
+  string ShortId(string id){ int i=id.LastIndexOf('-'); return i>=0&&i+1<id.Length? id.Substring(i+1,Math.Min(8,id.Length-i-1)) : id; }
   void OpenOfficial(){
     try{
       if(officialForm==null || officialForm.IsDisposed){
-        officialForm=new Form{Text="DeepSeek 官方会话",Icon=WhaleIcon(),FormBorderStyle=FormBorderStyle.SizableToolWindow,StartPosition=FormStartPosition.CenterScreen,Size=new Size(980,700),ShowInTaskbar=false,MinimizeBox=true};
+        officialForm=new Form{Text="DeepSeek 官方会话",Icon=WhaleIcon(),FormBorderStyle=FormBorderStyle.SizableToolWindow,StartPosition=FormStartPosition.CenterScreen,Size=new Size(_offW,_offH),ShowInTaskbar=false,MinimizeBox=true};
+        if(_offX!=int.MinValue&&PosOnScreen(new Point(_offX+_offW/2,_offY+20))){ officialForm.StartPosition=FormStartPosition.Manual; officialForm.Location=new Point(_offX,_offY); } // 记住上次位置；已移出屏幕则居中
         officialForm.FormClosing+=(s,e)=>{ if(e.CloseReason==CloseReason.UserClosing){ e.Cancel=true; officialForm.Hide(); } };
+        officialForm.ResizeEnd+=(s,e)=>QueueSavePos();
+        officialForm.Move+=(s,e)=>QueueSavePos();
         string folder=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"webview-userdata","deepseek-chat");
         try{ Directory.CreateDirectory(folder); }catch{}
         officialWv=new WebView2{Dock=DockStyle.Fill, CreationProperties=new CoreWebView2CreationProperties{ UserDataFolder=folder }};
@@ -380,6 +543,8 @@ public class TrayApp : ApplicationContext {
     }catch{}
   }
   void Tick(){
+    // 最近会话低频后台刷新：与菜单生命周期完全解耦，避免每次右键/关闭触发全量扫描拖慢 UI；重建带 RebuildRecentMenu 可见守卫
+    if(Environment.TickCount-recentRefreshMs>60000){ recentRefreshMs=Environment.TickCount; ScheduleRecentRefresh(); }
     if(!adopted){ adopted=true; Task.Run(()=>{ foreach(var s in services) Adopt(s); }); }
     foreach(var si in sessionItems) si.item.Visible = si.svc.Running;
     if(sepSess!=null) sepSess.Visible = services.Any(s=>s.Running);
@@ -417,7 +582,10 @@ public class TrayApp : ApplicationContext {
     foreach(var svc in services){ long L=svc.log.Length; if(L>svc.lastLen){ string t=svc.log.ToString((int)svc.lastLen,(int)(L-svc.lastLen)); svc.lastLen=L; logForm.Append("["+svc.Name+"] "+t); } }
   }
 
-  void ExitApp(){ StopAll(); icon.Visible=false; if(popup!=null)popup.Close(); Application.Exit(); }
+  void ExitApp(){ StopAll(); icon.Visible=false; if(popup!=null)popup.Close(); Application.Exit(); } // icon.Visible=false → NIM_DELETE，退出干净不留死图标
+  // 优雅退出：外部 --exit 信号（走同一 ExitApp，先注销图标再退出，避免 kill /F 在通知区留下死图标槽）
+  public void ExitFromSignal(){ try{ Ui(()=>ExitApp()); }catch{} }
+  void RestartTray(){ try{ Process.Start(new ProcessStartInfo(Application.ExecutablePath){ UseShellExecute=true, WorkingDirectory=AppDomain.CurrentDomain.BaseDirectory }); }catch{} ExitApp(); }
 
   // —— 隐藏自检模式：--dump-menu 打印当前菜单结构（供开发验证，不进正式 UI）——
   public void ProbeOnce(){ dshPortUp = DshUp()?1:0; dshState = dshPortUp==1?2:0; RefreshDshUi(); }
@@ -438,20 +606,44 @@ public class TrayApp : ApplicationContext {
     }
     return sb.ToString();
   }
+  public string MenuShowProbe(){
+    try{ recentList=ReadRecent(); RebuildRecentMenu(); }catch(Exception ex){ return "APPLY_FAIL "+ex.GetType().Name+": "+ex.Message; }
+    try{
+      int n=menu.Items.Count;
+      menu.Show(new Point(60,60));
+      System.Threading.Thread.Sleep(200);
+      return "SHOW_OK items="+n+" recent="+recentList.Count;
+    }catch(Exception ex){ return "SHOW_FAIL "+ex.GetType().Name+": "+ex.Message; }
+  }
 }
 
+public class RecentSession { public string Id=""; public string Title=""; public string Cwd=""; public long Last=0; }
+
 public static class Program2 {
-  static Mutex? _single;
+  static Mutex? _single; static bool _isPrimary;
+  static string ExitSignalName(){ return @"Local\DSH托盘_ExitSignal"; }
   [STAThread] public static void Main(string[] args){
+    // Per-Monitor V2：高分屏(2560@150%)下若 DPI unaware，Show(点) 坐标被系统二次缩放 → 菜单落到 (0,0)/越界看不到
+    try{ Application.SetHighDpiMode(HighDpiMode.PerMonitorV2); }catch{}
     Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
+    Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+    Application.ThreadException+=(s,e)=>{ try{ File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"tray-ex.log"),DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+" THREADEX "+e.Exception+"\r\n"); }catch{} };
+    AppDomain.CurrentDomain.UnhandledException+=(s,e)=>{ try{ File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"tray-ex.log"),DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+" FATAL "+e.ExceptionObject+"\r\n"); }catch{} };
     // 单实例互斥：开机自启双入口/重复启动时，后到者直接退出（防双托盘）
     bool dump = args!=null && args.Length>0 && args[0]=="--dump-menu";
     bool selftest = args!=null && Array.IndexOf(args,"--selftest-logwin")>=0;
-    // 单实例互斥：开机自启双入口/重复启动时后到者退出；诊断模式（--dump-menu/--selftest）不占锁
-    if(!dump && !selftest){
+    bool menuProbe = args!=null && Array.IndexOf(args,"--selftest-menushow")>=0;
+    bool askExit = args!=null && Array.IndexOf(args,"--exit")>=0;
+    // 单实例互斥：开机自启双入口/重复启动时后到者退出；诊断模式（--dump-menu/--selftest/--selftest-menushow）不占锁
+    if(!dump && !selftest && !menuProbe){
+      if(askExit){ // 优雅退出：通知正在运行的主实例自己注销图标再退出（替代 kill /F，避免通知区死图标槽）
+        try{ using(var ev=new EventWaitHandle(false,EventResetMode.AutoReset,ExitSignalName())){ ev.Set(); } }catch{}
+        return;
+      }
       bool createdNew;
       _single = new Mutex(true, @"Local\DSH托盘_SingleInstance", out createdNew);
       if(!createdNew) return;
+      _isPrimary=true;
     }
     var app=new TrayApp(dump||selftest);
     if(dump){
@@ -468,6 +660,17 @@ public static class Program2 {
       try{ File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"selftest-logwin.txt"), app.DshLogSnapshot()); }catch{}
       app.DisposeForDump();
       return;
+    }
+    if(menuProbe){
+      string r=app.MenuShowProbe();
+      try{ File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"selftest-menushow.txt"), r); }catch{}
+      app.DisposeForDump();
+      return;
+    }
+    if(_isPrimary){ // 主实例监听优雅退出信号（--exit / 重启托盘旧实例）
+      var exitEv=new EventWaitHandle(false,EventResetMode.AutoReset,ExitSignalName());
+      var wt=new System.Threading.Thread(()=>{ exitEv.WaitOne(); try{ app.ExitFromSignal(); }catch{} });
+      wt.IsBackground=true; wt.Start();
     }
     Application.Run(app);
   }

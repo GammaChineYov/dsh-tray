@@ -69,7 +69,7 @@ public static class LaunchArgs {
   // splitMode: 0=按层切分 layer（多卡默认，不依赖 split buffers，但双卡偶发崩）；1=张量并行 tensor（内置 AllReduce，稳定推荐）
   // bindAll: true=--host 0.0.0.0（局域网可访问，默认）；false=--host 127.0.0.1（仅本机）
   // GPU 规则：CPU→-ngl 0（去 flash-attn/量化 KV）；单卡→-ngl 99 --split-mode none；多卡→-ngl 99 --split-mode <layer|row> + --main-gpu 0
-  public static LaunchResult Build(Service svc, GpuSelection gpu, int ctx, int paramMode, int splitMode, int kvMode, int cacheRam, int gpuCount, bool bindAll=true) {
+  public static LaunchResult Build(Service svc, GpuSelection gpu, int ctx, int paramMode, int splitMode, int kvMode, int cacheRam, int tsGpu1, int gpuCount, bool bindAll=true) {
     var r = new LaunchResult();
     var a = r.args;
     a.Add("-m"); a.Add(svc.Model);
@@ -91,7 +91,7 @@ public static class LaunchArgs {
       a.Add("-ngl"); a.Add("99");
       // 张量并行 tensor(内置 AllReduce)：比 layer 稳（layer 双卡偶发崩）、比 row 能加载（row 需 split buffers，本机 MoE/mmproj 模型不支持）
       a.Add("--split-mode"); a.Add(splitMode==1 ? "tensor" : "layer");
-      if (splitMode==1) { a.Add("-ts"); a.Add("1,1"); }
+      if (splitMode==1) { a.Add("-ts"); a.Add((100-tsGpu1)+","+tsGpu1); } // 张量并行比例：GPU1 占比 tsGpu1%（默认50=均分，越大 GPU1 分越多份额）
       a.Add("--main-gpu"); a.Add("0");
     }
     if (!cpu) {
@@ -109,6 +109,7 @@ public static class LaunchArgs {
     a.Add("--reasoning"); a.Add("on");
     a.Add("--reasoning-format"); a.Add("deepseek");
     a.Add("--jinja");
+    if (svc.SpecDecode) { a.Add("--spec-type"); a.Add("draft-mtp"); }   // MTP 投机解码（SpecDecode 配置驱动；35B icompact 无 MTP 置 false 不加）
     a.AddRange(Sampler(paramMode));
     return r;
   }

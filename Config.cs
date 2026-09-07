@@ -32,6 +32,7 @@ public class AppConfig {
   public string DshOutLog { get; set; } = "";    // DSH stdout 日志（留空=exe 同目录 dsh-web-out.log）
   public string DshErrLog { get; set; } = "";    // DSH stderr 日志（留空=exe 同目录 dsh-web-err.log）
   public string DshHomeDir { get; set; } = "";    // 用户 .dsh 目录（留空=默认 %USERPROFILE%\.dsh；本机 DSH_HOME 非默认时填真实值）
+  public string DshWebToken { get; set; } = "";  // 当前 dsh web 启动 token（dsh web 每次启动会变；托盘弹窗用它首登种 cookie。留空=弹窗自行登录）
   public List<ServiceConfig> Services { get; set; } = new List<ServiceConfig>();
 }
 
