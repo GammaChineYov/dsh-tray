@@ -49,7 +49,7 @@ public class TrayApp : ApplicationContext {
   static readonly DateTime UNIX_EPOCH=new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc);
   // 采集缓存：JSON 文件 mtime 未变则复用解析结果，避免每次全量读+防病毒扫描拖慢右键/启动
   long _wsMt; HashSet<string> _archCache=new();
-  Dictionary<string,(long mt,string title,long last,long created,string cwd)> _sessCache=new();
+  Dictionary<string,(long mt,string title,long last,long created,string cwd,bool sub)> _sessCache=new();
 
   public TrayApp(bool dumpMode=false){
     cfg=Config.Load();
@@ -469,6 +469,7 @@ public class TrayApp : ApplicationContext {
         foreach(var kv in _sessCache){
           if(archived.Contains(kv.Key)) continue;
           var c=kv.Value;
+          if(c.sub) continue; // 子代理会话（并行 agent 任务）不进「最近会话」直达
           found.Add(new RecentSession{Id=kv.Key,Title=c.title,Cwd=c.cwd,Last=Math.Max(c.last,c.created)});
         }
       }
@@ -478,19 +479,21 @@ public class TrayApp : ApplicationContext {
     return found;
   }
   // 读单个 per-session 投影：record.identity.{createdAt,cwd} + record.rows.{title.val, sessionListMetadata.val.lastPromptAt}
-  (long mt,string title,long last,long created,string cwd) ReadProjRecord(string f,long mt){
-    string title=""; long last=0,created=0; string cwd="";
+  // sub=true 当 rows.subagent.val.identity 存在 → 该会话是并行子代理会话（agent 批量任务），非用户主会话，最近会话列表排除
+  (long mt,string title,long last,long created,string cwd,bool sub) ReadProjRecord(string f,long mt){
+    string title=""; long last=0,created=0; string cwd=""; bool sub=false;
     try{
       using(var doc=System.Text.Json.JsonDocument.Parse(File.ReadAllText(f))){ var root=doc.RootElement;
-        if(!root.TryGetProperty("record",out var rec)) return (mt,title,last,created,cwd);
+        if(!root.TryGetProperty("record",out var rec)) return (mt,title,last,created,cwd,sub);
         if(rec.TryGetProperty("identity",out var idt)){ if(idt.TryGetProperty("createdAt",out var ca)){ try{created=ca.GetInt64();}catch{} } if(idt.TryGetProperty("cwd",out var cw)) cwd=cw.GetString()??""; }
         if(rec.TryGetProperty("rows",out var rows)){
           if(rows.TryGetProperty("title",out var tt)&&tt.TryGetProperty("val",out var tv)&&tv.ValueKind==System.Text.Json.JsonValueKind.String) title=tv.GetString()??"";
           if(rows.TryGetProperty("sessionListMetadata",out var slm)&&slm.TryGetProperty("val",out var sv)&&sv.TryGetProperty("lastPromptAt",out var lp)){ try{last=lp.GetInt64();}catch{} }
+          if(rows.TryGetProperty("subagent",out var sa)&&sa.TryGetProperty("val",out var sav)&&sav.ValueKind==System.Text.Json.JsonValueKind.Object&&sav.TryGetProperty("identity",out _)) sub=true;
         }
       }
     }catch{}
-    return (mt,title,last,created,cwd);
+    return (mt,title,last,created,cwd,sub);
   }
   // 菜单动态内容唯一重建入口（模式）：读内存快照 recentList，仅菜单不可见时同步重建，零磁盘/零网络。
   // 触发只能来自：采集完成回调 / menu.Closed（都保证菜单不可见）；严禁在 Opening/显示期间调用或做慢 IO。
