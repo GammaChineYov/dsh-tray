@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Management;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -19,13 +20,15 @@ public class LogForm : Form {
 }
 
 public class TrayApp : ApplicationContext {
-  NotifyIcon icon; ContextMenuStrip menu; LogForm logForm; System.Windows.Forms.Timer clock; bool adopted=false;
+  NotifyIcon icon; ContextMenuStrip menu; LogForm logForm; System.Windows.Forms.Timer clock; bool adopted=false; TaskbarWatcher? _tw;
   ToolStripMenuItem? itemOpenChat,autoStartItem; ToolStripSeparator? sepSess; ToolStripMenuItem? pm,pm0,pm1,pm2;
   ToolStripMenuItem? gpuMenu,gpuAllItem,gpuCpuItem,ctxMenu; List<(ToolStripMenuItem item,int idx)> gpuItems=new(); List<ToolStripMenuItem> ctxItems=new();
   ToolStripMenuItem? splitMenu,splitLayerItem,splitRowItem;
+  ToolStripMenuItem? vram0Label,vram1Label; // 切分模式滑块旁：张量并行时 GPU0/GPU1 两卡显存估算（各 1 位小数，分两行）
   ToolStripMenuItem? kvMenu,kvDefItem,kv8Item,kv16Item;
   ToolStripMenuItem? cacheRamMenu; List<ToolStripMenuItem> cacheRamItems=new();
   ToolStripMenuItem? bindItem; bool bindAll=true; // 模型监听地址：true=0.0.0.0（局域网可访问，默认）；false=127.0.0.1（仅本机）
+  ToolStripMenuItem? mtpMenu; List<ToolStripMenuItem> mtpItems=new(); int mtpLevel=0; // MTP 投机解码档位：0=无 1=MTP 2=MTP2 3=MTP3 4=MTP4（--spec-draft-n-max）
   ToolStripMenuItem? dshMenu,dshStatusItem,dshStartItem,dshRestartItem,dshStopItem;
   volatile int dshState=0; // DSH 服务状态：0=未启动(红) 1=启动中(黄) 2=运行中(绿)
   long dshStartMs=0; bool dshTimeoutLogged=false; Bitmap? dotRed,dotYellow,dotGreen;
@@ -147,18 +150,30 @@ public class TrayApp : ApplicationContext {
     // 张量并行比例滑块（GPU1 占比%）：仅张量并行生效，拖拽=调整 -ts，重启对应服务后应用
     splitMenu.DropDownItems.Add(new ToolStripSeparator());
     var tsLabel=new ToolStripMenuItem("GPU1 占比: "+tsGpu1+"%（张量并行）"){Enabled=false};
+    vram0Label=new ToolStripMenuItem("GPU0≈—"){Enabled=false};
+    vram1Label=new ToolStripMenuItem("GPU1≈—"){Enabled=false};
+    var tsBar=new TrackBar{Minimum=10,Maximum=90,Value=tsGpu1,TickFrequency=10,SmallChange=5,LargeChange=10,Width=270,Height=26,AutoSize=false}; // 滑块 1.5 倍加长(180→270)
+    tsBar.ValueChanged+=(s,e)=>{ tsGpu1=tsBar.Value; tsLabel.Text="GPU1 占比: "+tsGpu1+"%（张量并行）"; RefreshChecks(); SaveCfg(); }; // RefreshChecks: 同步刷新一级菜单「切分模式：张量并行(N%)」标题当前值（含 VramSplitUpdate）
+    VramSplitUpdate();
     splitMenu.DropDownItems.Add(tsLabel);
-    var tsBar=new TrackBar{Minimum=10,Maximum=90,Value=tsGpu1,TickFrequency=10,SmallChange=5,LargeChange=10,Width=180,Height=26,AutoSize=false};
-    tsBar.ValueChanged+=(s,e)=>{ tsGpu1=tsBar.Value; tsLabel.Text="GPU1 占比: "+tsGpu1+"%（张量并行）"; SaveCfg(); };
     splitMenu.DropDownItems.Add(new ToolStripControlHost(tsBar));
+    splitMenu.DropDownItems.Add(vram0Label);
+    splitMenu.DropDownItems.Add(vram1Label);
+    // 不锁死子菜单宽度：加长滑块(270px)已是最宽项，子菜单按内容自适应即可（两行显存文本短于滑块），滚动时宽度稳定不抖。
     items.Add(splitMenu);
+    // MTP 投机解码档位（单选）：无 / MTP / MTP2 / MTP3 / MTP4 → --spec-type draft-mtp + --spec-draft-n-max N（重启对应服务后生效）
+    mtpMenu=new ToolStripMenuItem("MTP: "+MtpLabel(mtpLevel));
+    mtpMenu.ToolTipText="llama.cpp MTP 投机解码档位：无=关闭；MTP..MTP4=--spec-type draft-mtp 且 --spec-draft-n-max 为 1..4（预测 token 数，越高提速越明显、收益边际递减）。重启对应服务后生效。";
+    string[] mtpLabels={"无","MTP","MTP2","MTP3","MTP4"};
+    for(int i=0;i<mtpLabels.Length;i++){ int v=i; var it=new ToolStripMenuItem(mtpLabels[i],null,(s,e)=>{ mtpLevel=v; RefreshChecks(); SaveCfg(); }); it.CheckOnClick=false; mtpItems.Add(it); mtpMenu.DropDownItems.Add(it); }
+    items.Add(mtpMenu);
     // 模型监听地址（复选）：勾选=--host 0.0.0.0 局域网可访问（默认）；取消=--host 127.0.0.1 仅本机（下次启动服务生效）
     bindItem=new ToolStripMenuItem("模型监听 0.0.0.0（局域网可访问）",null,(s,e)=>ToggleBind());
     bindItem.ToolTipText="勾选后启动/重启模型服务时绑定所有网卡（--host 0.0.0.0，局域网设备可直接访问模型端口 808x）；取消勾选则仅本机可访问（--host 127.0.0.1）。下次启动服务生效。";
     bindItem.CheckOnClick=false;
     items.Add(bindItem);
     // 复选/单选二级菜单：点击后不隐藏（点外部/ESC 才关闭）
-    KeepOpen(pm.DropDown); KeepOpen(gpuMenu.DropDown); KeepOpen(ctxMenu.DropDown); KeepOpen(splitMenu.DropDown); KeepOpen(kvMenu.DropDown); KeepOpen(cacheRamMenu.DropDown);
+    KeepOpen(pm.DropDown); KeepOpen(gpuMenu.DropDown); KeepOpen(ctxMenu.DropDown); KeepOpen(splitMenu.DropDown); KeepOpen(kvMenu.DropDown); KeepOpen(cacheRamMenu.DropDown); KeepOpen(mtpMenu.DropDown);
     RefreshChecks();
     RefreshDshUi();
     items.Add(new ToolStripSeparator());
@@ -190,7 +205,15 @@ public class TrayApp : ApplicationContext {
     else{ menu.Closed+=(s,e)=>RebuildRecentMenu(); } // 采集完全交给 Tick 低频；Closed 仅内存快照重建（无 IO）
     // 通知区冷启动右键修复（A/B 证实必要：去掉后重启托盘右键须等很久才有反应）：
     // explorer 对刚 NIM_ADD 的图标建立右键路由很慢 → 启动 ~2.5s 重注册一次（delete+add）强制绑定，右键随即可用。
-    if(!dumpMode){ var rr=new System.Windows.Forms.Timer(); rr.Interval=2500; rr.Tick+=(s,e)=>{ rr.Stop(); rr.Dispose(); try{ icon.Visible=false; icon.Visible=true; }catch{} }; rr.Start(); }
+    if(!dumpMode){
+      // 弹出前重置菜单布局缓存：慢弹/异常显示会复用坏高度（顶层底部残留空白行，重启托盘才消），AutoSize 翻转强制每次重新度量
+      menu.Opening+=(s,e)=>{ try{ if(menu!=null&&!menu.Visible&&menu.AutoSize){ menu.AutoSize=false; menu.AutoSize=true; } }catch{} };
+      // 通知区冷启动右键修复（A/B 证实必要：去掉后重启托盘右键须等很久才有反应）：
+      // explorer 对刚 NIM_ADD 的图标建立右键路由很慢 → 启动 ~2.5s 重注册一次（delete+add）强制绑定，右键随即可用。
+      var rr=new System.Windows.Forms.Timer(); rr.Interval=2500; rr.Tick+=(s,e)=>{ rr.Stop(); rr.Dispose(); try{ icon.Visible=false; icon.Visible=true; }catch{} }; rr.Start();
+      // explorer 自身重启（TaskbarCreated）后图标路由同样可能重建很慢 → 收到通知延迟再重注册一次
+      try{ _tw=new TaskbarWatcher(); _tw.ExplorerRestarted+=()=>{ var t2=new System.Windows.Forms.Timer(); t2.Interval=900; t2.Tick+=(s2,e2)=>{ t2.Stop(); t2.Dispose(); try{ icon.Visible=false; icon.Visible=true; }catch{} }; t2.Start(); }; }catch{}
+    }
     clock=new System.Windows.Forms.Timer(); clock.Interval=1000; clock.Tick+=(s,e)=>Tick(); clock.Start();
   }
 
@@ -205,6 +228,7 @@ public class TrayApp : ApplicationContext {
       else if(l.StartsWith("kv=")){ int m; if(int.TryParse(l.Substring(3),out m)&&m>=0&&m<=2) kvMode=m; }
       else if(l.StartsWith("cacheRam=")){ int v; if(int.TryParse(l.Substring(9),out v)&&Array.IndexOf(LaunchArgs.CacheRamOptions,v)>=0) cacheRam=v; }
       else if(l.StartsWith("bind=")){ string s2=l.Substring(5).Trim().ToLowerInvariant(); bindAll = (s2!="127.0.0.1" && s2!="local" && s2!="0"); } // 缺省/未知一律按 0.0.0.0（兼容旧 cfg 无 bind 键）
+      else if(l.StartsWith("mtpLevel=")){ int m; if(int.TryParse(l.Substring(9),out m)&&m>=0&&m<=4) mtpLevel=m; }
       else if(l.StartsWith("popW=")){ int v; if(int.TryParse(l.Substring(5),out v)&&v>=400&&v<=6000) _popW=v; }
       else if(l.StartsWith("popH=")){ int v; if(int.TryParse(l.Substring(5),out v)&&v>=300&&v<=6000) _popH=v; }
       else if(l.StartsWith("offW=")){ int v; if(int.TryParse(l.Substring(5),out v)&&v>=400&&v<=6000) _offW=v; }
@@ -215,7 +239,7 @@ public class TrayApp : ApplicationContext {
       else if(l.StartsWith("offY=")){ int v; if(int.TryParse(l.Substring(5),out v)) _offY=v; }
     } }catch{}
   }
-  void SaveCfg(){ try{ File.WriteAllText(Cfg(),"paramMode="+paramMode+"\r\ngpu="+gpuSel.CfgString()+"\r\nctx="+ctxVal+"\r\nsplit="+(splitMode==0?"layer":"tensor")+"\r\ntsGpu1="+tsGpu1+"\r\nkv="+kvMode+"\r\ncacheRam="+cacheRam+"\r\nbind="+(bindAll?"0.0.0.0":"127.0.0.1")+"\r\npopX="+_popX+"\r\npopY="+_popY+"\r\npopW="+_popW+"\r\npopH="+_popH+"\r\noffX="+_offX+"\r\noffY="+_offY+"\r\noffW="+_offW+"\r\noffH="+_offH+"\r\n"); }catch{} }
+  void SaveCfg(){ try{ File.WriteAllText(Cfg(),"paramMode="+paramMode+"\r\ngpu="+gpuSel.CfgString()+"\r\nctx="+ctxVal+"\r\nsplit="+(splitMode==0?"layer":"tensor")+"\r\ntsGpu1="+tsGpu1+"\r\nkv="+kvMode+"\r\ncacheRam="+cacheRam+"\r\nbind="+(bindAll?"0.0.0.0":"127.0.0.1")+"\r\nmtpLevel="+mtpLevel+"\r\npopX="+_popX+"\r\npopY="+_popY+"\r\npopW="+_popW+"\r\npopH="+_popH+"\r\noffX="+_offX+"\r\noffY="+_offY+"\r\noffW="+_offW+"\r\noffH="+_offH+"\r\n"); }catch{} }
   // 弹窗位置/大小持久化：Move/ResizeEnd 都触发，防抖 600ms 写盘一次
   void QueueSavePos(){ _posSaveAct=SaveAllPos; if(_posSaveTimer==null){ _posSaveTimer=new System.Windows.Forms.Timer(); _posSaveTimer.Interval=600; _posSaveTimer.Tick+=(s,e)=>{ _posSaveTimer.Stop(); var a=_posSaveAct; _posSaveAct=null; if(a!=null) try{ a(); }catch{} }; } _posSaveTimer.Stop(); _posSaveTimer.Start(); }
   void SaveAllPos(){
@@ -254,6 +278,9 @@ public class TrayApp : ApplicationContext {
     if(kv8Item!=null) kv8Item.Checked=(kvMode==1);
     if(kv16Item!=null) kv16Item.Checked=(kvMode==2);
     for(int i=0;i<cacheRamItems.Count;i++) cacheRamItems[i].Checked=(LaunchArgs.CacheRamOptions[i]==cacheRam);
+    for(int i=0;i<mtpItems.Count;i++) mtpItems[i].Checked=(i==mtpLevel);
+    if(mtpMenu!=null) mtpMenu.Text="MTP: "+MtpLabel(mtpLevel);
+    if(vram0Label!=null) VramSplitUpdate();
     if(bindItem!=null) bindItem.Checked=bindAll;
     if(gpuMenu!=null) gpuMenu.Text="GPU: "+gpuSel.ShortLabel();
     if(ctxMenu!=null) ctxMenu.Text="上下文: "+(ctxVal/1024)+"K";
@@ -263,19 +290,40 @@ public class TrayApp : ApplicationContext {
     if(cacheRamMenu!=null) cacheRamMenu.Text="缓存内存: "+CacheRamLabel(cacheRam);
   }
   static string ParamLabel(int m){ return m==0?"通用思考":m==1?"编码思考":"Instruct"; }
+  static string MtpLabel(int m){ return m==0?"无":m==1?"MTP":"MTP"+m; }
+  // 张量并行时两卡显存估算（GPU0/GPU1 分两行各 1 位小数）：模型权重(GGUF 大小) + KV(按 ctx) + 每卡计算缓冲(≈1.1GB) 按 -ts 比例分摊。
+  // 细节（参考模型/ctx/占比）放 ToolTip；可见文本保持短且固定宽度，避免拖动滑块时子菜单宽度抖动（布局震荡）。仅供预览，实际以 llama-server 加载报告为准。
+  void VramSplitUpdate(){
+    try{
+      Service s = services.FirstOrDefault(x=>x.Running) ?? services.FirstOrDefault();
+      string txt0="GPU0≈—", txt1="GPU1≈—", tip="张量并行两卡显存估算（1 位小数）：模型权重+KV(按ctx)+每卡计算缓冲按 -ts 比例分摊；实际以 llama-server 加载报告为准。";
+      if(s!=null && !string.IsNullOrEmpty(s.Model) && File.Exists(s.Model)){
+        double modelGiB = new FileInfo(s.Model).Length / 1073741824.0;
+        double kvGiB = 3.0 * ctxVal / 262144.0;   // 35B 实测 256K(q8_0) KV≈3GB，按 ctx 线性近似
+        double compute = 1.1;                     // 计算缓冲每卡约 1.1GB（35B 量级）
+        double g0 = modelGiB*(100-tsGpu1)/100.0 + kvGiB*(100-tsGpu1)/100.0 + compute;
+        double g1 = modelGiB*tsGpu1/100.0 + kvGiB*tsGpu1/100.0 + compute;
+        txt0="GPU0≈"+g0.ToString("0.0")+"GB";
+        txt1="GPU1≈"+g1.ToString("0.0")+"GB";
+        tip="参考: "+Short(s)+" "+(ctxVal/1024)+"K | 模型权重(按GGUF)+KV(按ctx)+每卡计算缓冲≈1.1GB，按 -ts "+(100-tsGpu1)+"/"+tsGpu1+" 分摊；实际以 llama-server 加载报告为准。";
+      }
+      if(vram0Label!=null){ vram0Label.Text=txt0; vram0Label.ToolTipText=tip; }
+      if(vram1Label!=null){ vram1Label.Text=txt1; vram1Label.ToolTipText=tip; }
+    }catch{}
+  }
 
   bool PortUp(int port){ try{ using(var wc=new System.Net.WebClient()){ wc.DownloadString("http://127.0.0.1:"+port+"/health"); return true; } }catch{} return false; }
   void Start(Service svc){
     if(svc.Running){ Log(svc,svc.Name+" 已在运行 (端口 "+svc.Port+")\r\n"); return; }
     if(PortUp(svc.Port)){ Log(svc,"端口 "+svc.Port+" 已有服务在跑（非本应用启动），请先停用外部进程。\r\n"); return; }
-    var build=LaunchArgs.Build(svc,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll);
+    var build=LaunchArgs.Build(svc,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll,mtpLevel);
     var psi=new ProcessStartInfo(cfg.LlamaServerExe,string.Join(" ",build.args)){UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true,CreateNoWindow=true};
     if(build.envCuda.Length>0) psi.Environment["CUDA_VISIBLE_DEVICES"]=build.envCuda;
     if(build.envAllreduce.Length>0) psi.Environment["GGML_CUDA_ALLREDUCE"]=build.envAllreduce; // 多卡张量并行需要内置 CUDA AllReduce
     try{
       svc.proc=Process.Start(psi); svc.proc.OutputDataReceived+=(o,e)=>{if(e.Data!=null)svc.log.AppendLine(e.Data);}; svc.proc.ErrorDataReceived+=(o,e)=>{if(e.Data!=null)svc.log.AppendLine("[err] "+e.Data);}; svc.proc.BeginOutputReadLine(); svc.proc.BeginErrorReadLine();
       Log(svc,">>> 启动 "+svc.Name+" (端口 "+svc.Port+")\r\n");
-      Log(svc,"    GPU="+gpuSel.Describe(gpus)+" | ctx="+(ctxVal/1024)+"K | CUDA_VISIBLE_DEVICES="+(build.envCuda.Length>0?build.envCuda:"-")+" | 参数组="+(paramMode==0?"通用思考":paramMode==1?"编码思考":"Instruct")+" | 切分="+(splitMode==0?"按层 layer":splitMode==1?"张量并行 tensor("+tsGpu1+"%)":"-")+" | KV="+KvLabel(kvMode)+" | 缓存内存="+CacheRamLabel(cacheRam)+" | MTP="+(svc.SpecDecode?"on":"off")+" | 监听="+(bindAll?"0.0.0.0":"127.0.0.1")+"\r\n");
+      Log(svc,"    GPU="+gpuSel.Describe(gpus)+" | ctx="+(ctxVal/1024)+"K | CUDA_VISIBLE_DEVICES="+(build.envCuda.Length>0?build.envCuda:"-")+" | 参数组="+(paramMode==0?"通用思考":paramMode==1?"编码思考":"Instruct")+" | 切分="+(splitMode==0?"按层 layer":splitMode==1?"张量并行 tensor("+tsGpu1+"%)":"-")+" | KV="+KvLabel(kvMode)+" | 缓存内存="+CacheRamLabel(cacheRam)+" | MTP="+MtpLabel(mtpLevel)+" | 监听="+(bindAll?"0.0.0.0":"127.0.0.1")+"\r\n");
       if(gpuSel.UseCpu) Log(svc,"    注意: CPU 模式（-ngl 0），速度会显著变慢\r\n");
       else if(ctxVal>=196608 && LaunchArgs.EffectiveGpus(gpuSel,gpus.Count).Count==1 && (svc.Model.Contains("35B")||svc.Model.Contains("27B"))) Log(svc,"    注意: "+(ctxVal/1024)+"K 上下文 + 单 GPU 可能显存不足（OOM），建议 GPU=全部（多卡，切分模式=按层 layer）或降低 ctx\r\n");
       Log(svc,"    首次加载约 30-60s\r\n");
@@ -400,14 +448,56 @@ public class TrayApp : ApplicationContext {
 
   string ExtractBlock(string y){ int i=y.IndexOf("agent-default-model:"); if(i<0)return null; int h=y.IndexOf("\n",i); if(h<0)h=i; int be=y.Length; for(int id=h+1; id<y.Length; id++){ if(y[id]=='\n' && id+1<y.Length && y[id+1]!=' '){ be=id+1; break; } } return y.Substring(i, be-i); }
   string ReplaceBlock(string y, string block){ int i=y.IndexOf("agent-default-model:"); if(i<0)return y; int h=y.IndexOf("\n",i); if(h<0)h=i; int be=y.Length; for(int id=h+1; id<y.Length; id++){ if(y[id]=='\n' && id+1<y.Length && y[id+1]!=' '){ be=id+1; break; } } return y.Substring(0,i)+block+y.Substring(be); }
+  // 在 settings.yaml 的 llm-pi-ai.providers 下确保 <provider> 块存在，并把 baseURL(端口)/首个模型 id 校准为托盘服务实际值。
+  // 只做最小修改：其它 provider 与顶层键一律保持。返回修改后的全文；任何失败/异常原样返回 y。
+  string EnsureLlamaProvider(string y, string provider, int port, string model){
+    try{
+      var lines=new List<string>(y.Split('\n'));
+      int Ind(string l){ int n=0; while(n<l.Length&&l[n]==' ') n++; return n; }
+      int FindExact(int from,int ind_,string marker){ for(int i=from;i<lines.Count;i++) if(Ind(lines[i])==ind_ && lines[i].Trim()==marker) return i; return -1; }
+      int pi=FindExact(0,0,"llm-pi-ai:"); if(pi<0) return y;
+      int pv=FindExact(pi+1,2,"providers:"); if(pv<0) return y;
+      int bs=-1; for(int i=pv+1;i<lines.Count;i++) if(Ind(lines[i])==4 && lines[i].Trim().StartsWith(provider+":")){ bs=i; break; }
+      if(bs<0){
+        int ins=pv+1; for(int i=pv+1;i<lines.Count;i++){ if(Ind(lines[i])==4) ins=i; else if(Ind(lines[i])==0 && lines[i].Trim().Length>0) break; }
+        var block=new List<string>{
+          "    "+provider+":",
+          "      displayName: 本地 llama.cpp "+provider,
+          "      api: openai-completions",
+          "      baseURL: http://127.0.0.1:"+port+"/v1",
+          "      apiKeyEnv: LLAMA_LOCAL_API_KEY",
+          "      models:",
+          "        - id: '"+model+"'",
+          "          name: "+provider+" 本地",
+          "          contextWindow: 196608",
+          "          maxTokens: 32000"
+        };
+        lines.InsertRange(ins,block);
+        return string.Join("\n",lines);
+      }
+      int be=lines.Count; for(int i=bs+1;i<lines.Count;i++){ if(lines[i].Trim().Length==0) continue; if(Ind(lines[i])<6){ be=i; break; } }
+      var body=lines.GetRange(bs,be-bs);
+      bool hasBase=false;
+      for(int i=0;i<body.Count;i++){ var m=System.Text.RegularExpressions.Regex.Match(body[i], @"^(\s*)baseURL:\s*.*$"); if(m.Success){ hasBase=true; body[i]=m.Groups[1].Value+"baseURL: http://127.0.0.1:"+port+"/v1"; } }
+      if(!hasBase){ int ai=body.FindIndex(l=>System.Text.RegularExpressions.Regex.IsMatch(l, @"^\s*api:\s")); body.Insert(ai>=0?ai+1:1, "      baseURL: http://127.0.0.1:"+port+"/v1"); }
+      bool idFound=false;
+      for(int i=0;i<body.Count;i++){ var m=System.Text.RegularExpressions.Regex.Match(body[i], @"^(\s*)- id:\s*.*$"); if(m.Success&&!idFound){ idFound=true; body[i]=m.Groups[1].Value+"- id: '"+model+"'"; } }
+      if(!idFound){ int mi=body.FindIndex(l=>System.Text.RegularExpressions.Regex.IsMatch(l, @"^\s*models:\s*$")); if(mi>=0){ body.Insert(mi+1,"        - id: '"+model+"'"); body.Insert(mi+2,"          name: "+provider+" 本地"); } }
+      var res=new List<string>(lines.GetRange(0,bs)); res.AddRange(body); res.AddRange(lines.GetRange(be,lines.Count-be));
+      return string.Join("\n",res);
+    }catch{ return y; }
+  }
+  // —— 会话打开时自动校准 DSH 模型配置：确保 provider 块存在、baseURL(端口)/模型 id 与托盘服务一致，再把 agent-default-model 指向该模型（8s 后还原）——
   void OpenSession(Service svc){
     string orig=null; string yp=cfg.SettingsYamlPath;
-    try{ string y=File.ReadAllText(yp); orig=ExtractBlock(y);
+    try{ string y=File.ReadAllText(yp);
       string prov=string.IsNullOrEmpty(svc.Provider)? "llama-local" : svc.Provider;
+      y=EnsureLlamaProvider(y, prov, svc.Port, svc.Model);   // 端口/模型名漂移即修（只改 llm-pi-ai.providers 对应块）
+      orig=ExtractBlock(y);
       File.WriteAllText(yp, ReplaceBlock(y, "agent-default-model:\r\n  provider: "+prov+"\r\n  model: '"+svc.Model+"'\r\n"));
     }catch{}
-    OpenPop();
-    if(orig!=null){ var rt=new System.Windows.Forms.Timer(); rt.Interval=8000; rt.Tick+=(s,e)=>{ try{ File.WriteAllText(yp, ReplaceBlock(File.ReadAllText(yp), orig)); }catch{} rt.Stop(); rt.Dispose(); }; rt.Start(); }
+    OpenPop();   // 打开弹窗（本地 localStorage 键会在文档创建时被清，令 dsh web 新建会话并应用上面写入的本地模型）
+    if(orig!=null){ var rt=new System.Windows.Forms.Timer(); rt.Interval=30000; rt.Tick+=(s,e)=>{ try{ File.WriteAllText(yp, ReplaceBlock(File.ReadAllText(yp), orig)); }catch{} rt.Stop(); rt.Dispose(); }; rt.Start(); }
   }
   void OpenPop(){ EnsurePopupNav(cfg.DshUrl,false); }
   void OpenSessionById(string sessionId){ try{ EnsurePopupNav(BuildSessionUrl(sessionId),true); }catch(Exception ex){ MessageBox.Show("打开会话失败: "+ex.Message); } }
@@ -425,6 +515,10 @@ public class TrayApp : ApplicationContext {
       popup.ResizeEnd+=(s,e)=>QueueSavePos();
       popup.Move+=(s,e)=>QueueSavePos();
       wv=new WebView2{Dock=DockStyle.Fill}; popup.Controls.Add(wv);
+      // dsh web 新版会在浏览器 localStorage 持久「上次会话」(dsh.sessions.current) 与工作区视图(dsh.workspace.view.v5)，
+      // 导致打开 base URL 恢复上次会话（而不是新建）。这里在每次文档创建、页面脚本运行前清掉这两个键（不动 cookie，登录态保留），
+      // 让托盘「打开 DSH 会话」= 新建一个会话（watchNavigation 默认流），从而应用刚写入的 agent-default-model（本地模型）。
+      wv.CoreWebView2InitializationCompleted+=(s,e)=>{ try{ wv.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync("try{localStorage.removeItem('dsh.sessions.current');localStorage.removeItem('dsh.workspace.view.v5');}catch(err){}"); }catch{} };
       wv.NavigationCompleted+=(s,e)=>{ if(!string.IsNullOrEmpty(_pendingAfterLogin)){ var u=_pendingAfterLogin; _pendingAfterLogin=""; try{ wv.Source=new Uri(u); }catch{} } };
     }
     popup.Show(); popup.Activate(); if(popup.WindowState==FormWindowState.Minimized) popup.WindowState=FormWindowState.Normal;
@@ -621,6 +715,17 @@ public class TrayApp : ApplicationContext {
 }
 
 public class RecentSession { public string Id=""; public string Title=""; public string Cwd=""; public long Last=0; }
+
+// 监听 explorer 重启（TaskbarCreated 广播）→ TrayApp 延迟重注册图标重建右键路由
+internal sealed class TaskbarWatcher : NativeWindow {
+  static readonly int _msg = NativeMethods.RegisterWindowMessage("TaskbarCreated");
+  public event Action? ExplorerRestarted;
+  public TaskbarWatcher(){ CreateHandle(new CreateParams()); }
+  protected override void WndProc(ref Message m){ if(_msg!=0 && m.Msg==_msg) ExplorerRestarted?.Invoke(); base.WndProc(ref m); }
+}
+internal static class NativeMethods {
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int RegisterWindowMessage(string lpString);
+}
 
 public static class Program2 {
   static Mutex? _single; static bool _isPrimary;

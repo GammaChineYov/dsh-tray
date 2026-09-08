@@ -46,7 +46,7 @@ DSH (状态圆点: ●绿运行/●黄启动中/●红未启动)   ← 顶层第
 启动 <模型>（每模型一条） | 停止全部 | 重启全部
 ── 分隔 ──
 推理参数组：<当前组>（单选，标题带当前值）
-GPU: <选择>（复选） | 上下文: <N>K（单选，标题带当前值） | KV 缓存：<当前>（单选） | 缓存内存：<当前>（单选；--cache-ram MiB；0=禁用/-1=无限制；cfg 键 cacheRam=） | 切分模式：<当前>（单选）
+GPU: <选择>（复选） | 上下文: <N>K（单选，标题带当前值） | KV 缓存：<当前>（单选） | 缓存内存：<当前>（单选；--cache-ram MiB；0=禁用/-1=无限制；cfg 键 cacheRam=） | 切分模式：<当前>（单选） | MTP: <档位>（单选；无/MTP/MTP2/MTP3/MTP4 → --spec-type draft-mtp --spec-draft-n-max N；重启对应服务后生效；cfg 键 mtpLevel=）
 模型监听 0.0.0.0（局域网可访问）（复选；勾选=--host 0.0.0.0 默认，取消=--host 127.0.0.1 仅本机；下次启动生效；cfg 键 bind=）
 ── 分隔 ──
 查看日志（服务日志窗口） | 打开配置文件
@@ -59,6 +59,9 @@ GPU: <选择>（复选） | 上下文: <N>K（单选，标题带当前值） | K
 - 模型监听复选项默认勾选（0.0.0.0），兼容早期硬编码行为；取消勾选才收紧为 127.0.0.1，避免默认回归。
 - 不要加含义模糊的项（曾因「停止所选服务」语义不明被移除）。
 - 验证：publish\DSHTray.exe --dump-menu → menu-dump.txt 核对结构与勾选/禁用态。
+- **切分模式滑块旁的显存估算**：张量并行时显示「GPU0≈X.XGB  GPU1≈Y.YGB（<模型> <ctx>K 估算）」——参考模型(运行中优先)GGUF 大小 + KV(ctx 近似) + 每卡计算缓冲(≈1.1GB) 按 `-ts` 比例分摊；仅供预览，实际以 llama-server 加载报告为准（`VramSplitPreview()`）。
+- **打开 DSH 会话自动校准模型配置**：点「打开 DSH 会话（<模型>）」时，先 `EnsureLlamaProvider` 在 settings.yaml 的 `llm-pi-ai.providers.<provider>` 下校准 **baseURL 端口 = 托盘服务 port**、**首个模型 id = 托盘服务 Model**（只改对应 provider 块，其它 provider/顶层键不动；provider 块缺失则整块补插），再临时改 `agent-default-model` 指向该模型（**30s 后还原**）。用于「端口变了/模型名变了」后 DSH 会话仍指向正确模型。
+  - **新建会话的关键**：dsh 0.1.3+ 会在浏览器 localStorage 持久「上次会话」(`dsh.sessions.current` / `dsh.workspace.view.v5`)，打开 base URL 会恢复上次会话而非新建；托盘在弹窗 WebView2 用 `AddScriptToExecuteOnDocumentCreatedAsync` 在每次文档创建时清掉这两个键（不动 cookie），使「打开 DSH 会话」= 新建会话并应用 agent-default-model（本地模型）。
 
 ## 4. 配置与隐私（公共仓库安全）
 
