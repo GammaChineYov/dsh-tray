@@ -33,6 +33,9 @@ public class AppConfig {
   public string DshErrLog { get; set; } = "";    // DSH stderr 日志（留空=exe 同目录 dsh-web-err.log）
   public string DshHomeDir { get; set; } = "";    // 用户 .dsh 目录（留空=默认 %USERPROFILE%\.dsh；本机 DSH_HOME 非默认时填真实值）
   public string DshWebToken { get; set; } = "";  // 当前 dsh web 启动 token（dsh web 每次启动会变；托盘弹窗用它首登种 cookie。留空=弹窗自行登录）
+  // dshtray-status host 插件（~/.dsh/dev-plugins/dshtray-status）令牌文件与会话已读表路径；留空 = 默认 %USERPROFILE%\.dsh 下
+  public string DshtrayTokenPath { get; set; } = "";   // dshtray-status.token（插件生成、托盘读取，作 /dshtray-status/api 鉴权）
+  public string RecentReadPath { get; set; } = "";     // dshtray-read.json（托盘本地“已点开会话”记录，未读徽标依据）
   public List<ServiceConfig> Services { get; set; } = new List<ServiceConfig>();
 }
 

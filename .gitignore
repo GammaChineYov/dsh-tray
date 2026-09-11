@@ -2,8 +2,13 @@ bin/
 obj/
 publish/
 publish-new/
+publish-staged/
+publish-next/
 *.cfg
 dsh-tray-config.json
 webview-userdata/
 *.user
 .vs/
+*.bak-*
+*.bak
+

@@ -39,22 +39,61 @@ DSH (状态圆点: ●绿运行/●黄启动中/●红未启动)   ← 顶层第
  ├─ 状态：…（禁用信息行）
  ├─ 启动 DSH / 重启 DSH / 停止 DSH
  ├─ 查看 DSH 日志（专用跟踪窗口）
+ ├─ 检查/清除孤儿启动锁（node_modules.lock）        ← 手动复查；启动时已自动处理（§11.6）
  ├─ 打开 DSH 程序目录 / 打开 .dsh 目录
 ── 分隔 ──
-打开 DSH 会话（每模型一条，按运行态显隐）/ 打开官方会话 chat
+最近会话（子项带会话状态圆点；图例见该项 ToolTipText）
+   ●绿=执行中 ●黄=阻塞·询问 ●橙=阻塞·权限 ●蓝=已完成·未读 ●灰=已完成(已读)
+   ●红=异常中断(非手动终止/错误/崩溃) ●浅=空/未收尾 ●透明=状态未知(DSH 未运行或插件未装)
+打开官方会话 chat
 ── 分隔 ──
-启动 <模型>（每模型一条） | 停止全部 | 重启全部
+<状态圆点> <模型名> (<端口>)（每模型一条，二级菜单，2026-09-11 改造）
+   状态圆点：●黄=启动中 ●绿=运行中 ●橙=运行中(未托管，端口上有 llama 但托盘未接管) ●红=未运行
+ ├─ 状态：…（禁用行；悬浮给全量：pid / 启动时刻 / 已运行时长 / 内存 / 模型 / 端口 / provider / 服务端实测）
+ ├─ 启动 DSH 会话（官方 Web UI；先校准 settings.yaml 再打开，§4 同旧「打开 DSH 会话」逻辑）
+ ├─ 启动内置对话（ThinChatForm 瘦客户端；同样先校准 settings.yaml）
+ ├─ 启动模型 / 重启模型 / 停止模型  ← 这三项**点击后不收起菜单**（可连续操作、立即看到状态变化）
+ ├─ 运行时配置（禁用）
+ │   ├─   环境配置
+ │   │     ├─ CUDA_VISIBLE_DEVICES = …（-ts 多卡时=选中的 GPU 列表；CPU/单卡时=未设置）
+ │   │     └─ GGML_CUDA_ALLREDUCE = internal（多卡张量并行时；否则未设置）
+ │   └─   llama.cpp 配置（悬浮=完整命令行）
+ │         模型 = … · 无 mmproj / mmproj = …
+ │         GPU0+1 · -ngl 99 · --split-mode tensor -ts 50,50
+ │         上下文 = 192K · KV = … · 批 = B/UB · 缓存内存 = …
+ │         MTP = … · 参数组 = … · flash-attn = …
+ │         监听 = 0.0.0.0:8081 · reasoning = deepseek · jinja
+ │         实测 = ctx …(服务端 /props) · 视觉 …（未运行时提示「启动后自动探测」）
+停止全部 | 重启全部（重启全部 = 逐个「重启模型」，同样重读配置、不碰 DSH）
 ── 分隔 ──
 推理参数组：<当前组>（单选，标题带当前值）
 GPU: <选择>（复选） | 上下文: <N>K（单选，标题带当前值） | KV 缓存：<当前>（单选） | 缓存内存：<当前>（单选；--cache-ram MiB；0=禁用/-1=无限制；cfg 键 cacheRam=） | 切分模式：<当前>（单选） | MTP: <档位>（单选；无/MTP/MTP2/MTP3/MTP4 → --spec-type draft-mtp --spec-draft-n-max N；重启对应服务后生效；cfg 键 mtpLevel=）
 模型监听 0.0.0.0（局域网可访问）（复选；勾选=--host 0.0.0.0 默认，取消=--host 127.0.0.1 仅本机；下次启动生效；cfg 键 bind=）
 ── 分隔 ──
 查看日志（服务日志窗口） | 打开配置文件
-开机自启动 | 退出
+开机自启动 | 重启托盘 | 退出 | 退出（同时停止模型服务）
 ```
+
+- **两个「退出」的区别（2026-09-11 语义反转）**：`退出` = `ExitApp(false)` = **默认**，只注销图标退托盘，
+  llama-server 继续服务，下次启动托盘经 `Adopt()` 自动接管（§11.7）；`退出（同时停止模型服务）` = `ExitApp(true)`
+  → `StopAll()`（停掉本托盘启动/接管的模型，释放显存），等价 CLI `DSHTray.exe --exit --stopall`。
+  反转理由：退出托盘是常态、停模型是例外，**默认不应有破坏性**（停模型要重载 30-60s）。
+  `重启托盘` 也已改为**保留模型**（`ExitApp(false)`；新实例起来后会 `Adopt()` 接管端口上已跑的模型）。
 
 - 规则：**目录/环境类动作放 DSH 二级菜单**（打开 DSH 程序目录、打开 .dsh 目录、查看 DSH 日志）；
   顶层只放高频操作与全局配置。
+- **「最近会话」子项状态圆点（2026-09 新增）**：会话实时状态（执行中/阻塞·询问/阻塞·权限/已完成/异常中断）
+  **只存在于 dsh host 内存与事件流**（磁盘 projcache 投影无会话级状态、会话消息不落盘）。托盘经
+  **dsh host 内插件 dshtray-status**（~/.dsh/dev-plugins/dshtray-status，`GET /dshtray-status/api`，
+  进程内读 sessionQuery.observeSession + agents）轮询权威信号；plugin token 存 ~/.dsh/dshtray-status.token。
+  「已完成·未读/已读」由**托盘本地 sidecar**（~/.dsh/dshtray-read.json，cfg 键 DshtrayTokenPath/RecentReadPath
+  可改路径）记录“托盘弹窗点开过的会话 id”推导——与 dsh web 自身的“上次访问 seq”是两套来源，不假装同步。
+  轮询在 ScheduleRecentRefresh 的后台任务里（60s 低频 + dshPortUp 守卫）；DSH 未运行/插件未装/超时 → 全部
+  静默降级为透明占位（unknown），绝不显示编造状态。
+- **「最近会话」只含有内容的会话（2026-09 修订）**：`sessionListMetadata.val.blank=true` 的空会话
+  （创建后从未发过用户消息，无标题无 lastPromptAt）**不进列表**——否则排序用 `Max(lastPromptAt,createdAt)`
+  会让新建空会话靠创建时间顶到列表前部，出现成片「(无标题 …)」。
+  判据：`ReadProjRecord` 解析 blank → `ReadRecent` 过滤（`if(c.blank) continue;`）。
 - 「推理参数组/切分模式/上下文/KV缓存/缓存内存/GPU」标题实时显示当前选中值（RefreshChecks() 统一刷新）。
 - 模型监听复选项默认勾选（0.0.0.0），兼容早期硬编码行为；取消勾选才收紧为 127.0.0.1，避免默认回归。
 - 不要加含义模糊的项（曾因「停止所选服务」语义不明被移除）。
@@ -81,8 +120,29 @@ dotnet publish -c Release -o publish
 Start-Process -FilePath .\publish\DSHTray.exe -WorkingDirectory .\publish
 ```
 - 只改源码不重发 = 线上不生效；发布目录被锁 = 先停托盘。
-- 发布前如有 llama 服务在跑，先经托盘「停止全部」再重启托盘（避免孤儿管道）。
-- 本机验证出口：--dump-menu（结构）、--selftest-logwin（DSH 日志窗口）、单实例双启=1 进程。
+- **先退出托盘**（默认就保留模型，版本 ≥ 2026-09-11 的 `--exit` 即为此意）：
+  `publish\DSHTray.exe --exit`（或托盘菜单「退出」/ 桌面 `dsh-tray-exit-keep-model.cmd`），模型服务不会被打断。
+  想把模型一起停掉才用 `--exit --stopall`（桌面 `dsh-tray-exit-stop-model.cmd`）。
+  ⚠️ 版本 ≥ 2026-09-10b 且 < 2026-09-11 的构建里，`--exit` 旧语义是**停模型**，那时保留模型要 `--exit --nostop`
+  （该别名现在仍被接受，但已等价默认）；再旧的版本没有这个开关，只能 `Stop-Process -Force`。
+- 本机验证出口：--dump-menu（结构）、--selftest-svcmenu（每模型二级菜单：状态映射矩阵 + 运行时配置渲染 + 一级旧入口残留检查，§11.8）、--selftest-logwin（DSH 日志窗口）、--selftest-lock（孤儿写锁判定，§11.6）、--selftest-exit（退出信号监听者探测，§11.7）、单实例双启=1 进程。
+
+**上线脚本 `apply-dsh-tray.cmd`（桌面）现在用优雅退出而非强杀**（2026-09-11）：先 `publish\DSHTray.exe --exit --nostop`（`--nostop` 在新旧构建里都表示「保留模型」→ 跨版本安全）等它自己退，最多等 12s，超时才 `taskkill /F` 兜底。好处：走 `ExitApp` → 图标正常注销（不留死图标槽）、模型完全不被碰。
+
+**不想打断模型服务时的发布流程（2026-09-10 新增，已验证）**：直接覆盖发布要先把托盘弄掉，而版本 < 2026-09-10b 的托盘只有 `ExitApp → StopAll` 这一条退出路径（会停模型）、`Stop-Process -Force` 又会留下孤儿模型；若模型正在用、不想重载，走「暂存 + 切换」：
+```powershell
+# 1) 托盘继续跑也能构建：发到独立暂存目录（不能发进正在跑的 publish/，dll 被锁）
+dotnet publish -c Release -o publish-next
+# 2) 双击桌面 apply-dsh-tray.cmd
+#    UAC 自提权 → 校验源构建含 --selftest-exit（防陈旧产物）→ taskkill /F 全部 DSHTray
+#    → robocopy publish-next → publish → 启新托盘
+```
+- `taskkill /F` **不走** `ExitApp`，所以模型进程活着；新托盘启动时 `Adopt()`（`netstat -ano` 找该端口 LISTENING 的 pid，进程名含 `llama` 即 `svc.proc=pr`）**会自动接管**→ 菜单里可见、可停、可重启，无需重载。
+- 接管的前提是权限：托盘若**未提权**而 llama-server 是提权的（反之亦然），`Process.GetProcessById` 抛访问拒绝被 `catch` 吞掉 → 接管失败。此时才需要桌面 `kill-llama-orphan.cmd` 收回，再从托盘启动。
+- ⚠️ **绝不要让暂存产物覆盖本地运行态文件**：任何目录里跑过一次托盘都会生成默认模板 `dsh-tray-config.json`（默认值 + 本地 llama 路径，含 `<you>` 占位），拷进 publish 会**抹掉用户真实配置**。切换脚本已 `/XF dsh-tray-config.json dsh-tray.cfg *.log *.txt` + `/XD webview-userdata` 排除。
+- ⚠️ **发布必须复核产物真的是新的**（2026-09-10 踩坑）：暂存目录若被上一个残留 DSHTray 进程锁着，`dotnet publish` 会失败而**旧 exe 时间戳不变**；只看 "0 个错误" 会误判。体检方式：`DSHTray.exe --selftest-exit` 必须产出 `selftest-exit.txt`（新开关），或按 UTF-16 检索 DLL 里的新字符串（`.NET` 字符串常量是 UTF-16，`grep` ASCII 查不到，别被误导）。apply 脚本已内置这道自检。
+- `publish-staged/` `publish-next/` 已进 .gitignore。
+- **WorkBuddy 侧无法强杀提权托盘**：PowerShell 工具对**提权**的桌面会话进程 `Stop-Process` 返回「拒绝访问」（令牌权限不足；普通权限的子进程可以杀），`cmd.exe` 又被安全策略整体拦截 → 这类"杀用户进程"的动作只能落到用户双击的 .cmd 里（apply 脚本因此带 UAC 自提权）。
 
 ## 6. 数据源诚实策略（温度/数值）
 
@@ -136,3 +196,137 @@ WinForms 下拉显示是模态且状态敏感——显示期间对 DropDownItems
 - **通知区冷启动右键（必要对策，勿删）**：重启托盘后，explorer 可能长时间不建立图标右键路由 → 右键无反应/延迟。2026-09-07 A/B 证实必须保留「启动 ~2.5s 后 `icon.Visible=false→true` 重注册一次」（触发 NIM_DELETE/ADD 强制绑定），否则重启后右键要等很久。若你认为可移除，请先做同款 A/B（去掉→重启→立即右键）确认不再复发。
 - **右键不弹 = 幽灵菜单（2026-09-08 已加防御）**：探针显示"右键不弹"时 `MouseUp` 读到 `menu.Visible` 已为 True——存在 `Visible=true` 但用户看不见的菜单残留（曾被弹到不可见位置且未关），NotifyIcon 因 `Visible` 不再重弹。已加防御：`MouseUp` 里若 `menu.Visible` 且 Bounds 不在任何工作屏 → `menu.Close()` 清掉（命中才写 GHOSTCLR 日志）。若仍偶发不弹，先看 GHOSTCLR 是否命中。
 - **重启后首次右键被 explorer 消费（已知现象，非回归）**：2026-09-08 实测——重启托盘后，**第一次右键消息被 explorer 用于建立图标路由而消费掉（日志无 RUP/无 GHOSTCLR），第二次右键起正常**。这是 Windows 通知区对新注册图标的行为；重注册已尽量缩短窗口。验收/排查右键问题时请右键 ≥2 次，勿把首次丢弃误判为回归。
+
+## 11. 内置渲染 / 安全模式 / 插件管理（2026-09-09 新增）
+
+背景：dsh 官方 Web UI 的客户端 bundle 由 loader entry 组装（本机 40+ client 模块），任一插件（尤其 super-injector 注入的 dev 插件）client.js 导入失败 → **整树白屏、无法续会话**（实测 `@dsh-external/dsh-topic-relay`）。但后端 cordis 与 `~/.dsh/sessions/**` 数据完好，3080 JSON-RPC 不受客户端 bundle 影响。三项功能因此而生：
+
+### 11.1 托盘内置渲染（ThinChatForm.cs）
+- WebView2 承载**内嵌单文件 HTML**（`Page.Html`，无 CDN 依赖），JS 经 `chrome.webview.postMessage` 桥到 C#，C# 用 `DshRpc` 打 `http://127.0.0.1:3080/api/<method>`——**绕开 CORS 也绕开官方 bundle**。
+- **认证（DshAuth.cs）**：读 `~/.dsh/.credentials.yaml` 的 `client-connection/browser-session` secret，自签 cookie——名 `dsh-auth-<b64u(sha256(authority))>`，值 `v1.<b64u(JSON{version,authority,issuedAt,expiresAt})>.<b64u(HMAC-SHA256(secret, body))>`。与每次启动变化的 `?token=` 无关，30 天有效、重启保留。契约见 dsh 源码 `packages/client/connection/src/browser-auth.ts`。
+- **RPC 契约（实测 0.1.0-rc 新版）**：斜杠方法名（`session/list` 不是 `session.list`）；信封 `payload:{args:{...}}`；`session/list` 参数 wire 名是 **`_request`**，其余（page/prompt/cancel/create/fork/search）是 `request`；历史用 `session/page {address:{kind:'session',sessionId}, throughSeq, maxMessages}`——throughSeq 未知时先传 `9007199254740991`，错误消息含 `past cursor N` → 用 N 重试；`session/follow` 是 stream Remote，普通 POST 拒绝（"must be opened through the stream carrier"），瘦客户端用 2.5s 轮询 page 代替。
+- 事件渲染：user/message、assistant/message（reasoning 折叠、text 走极简 markdown）、tool/call+result（折叠截断）、turn/end（分隔线）；其余事件类型跳过。
+- P0 边界：approval 待批会话会卡住（提示回官方 UI）；附件/plan 模式不实现。
+- **WinForms 同步上下文死锁（自检踩过）**：TrayApp 构造建 LogForm 后主线程装上 WindowsFormsSynchronizationContext，之后任何 `xxxAsync().GetResult()` 都会死锁（续体排进不泵消息的主线程）。自检/同步等待一律 `Task.Run(()=>...).GetAwaiter().GetResult()`；正常功能全走 async void + 消息循环，不受影响。
+
+### 11.2 安全模式启动（PluginCenter.cs + DshStart 注入）
+- 机制 = dsh 原生 `--patch <file>` 全局 overlay（`dsh --help` 证实，应用于 profile 层之后）。托盘每次启动/重启 DSH 前重建 `dsh-tray-safemode.patch.yml`（exe 同目录），内容 `- id: X / disabled: true`。**零侵入**：不碰 cordis.patch.yml/package.json，取消勾选重启即还原。
+- **参数顺序坑**：`bin.js --patch X web` 会被拒（"web takes none of parent --profile/--patch..."）→ 带 patch 必须用 `bin.js --profile web --patch X` 形式（web 是 --profile web 的别名）。
+- 白名单 = `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-web-app` 两个 bundle 贡献的全部 entry + 用户 cordis.patch.yml 层里 name 以 `@deepseek-ai/` 开头的条目（如 tool-session-query）。⚠️ 不能按 entry 的包名判官方：`@tt-a1i/archify-dsh` 贡献的 entry 包名是 `@deepseek-ai/dsh-skill-filesystem`，按 bundle 归属判才正确。
+- entry id 获取：优先 `bin.js --profile web --dump-config` 合成树（分节头 `# == <bundle>`，entry 级 `- id:`/`disabled:`，~8s）；dump 失败兜底读**每个 bundle 包目录自带的 cordis.patch.yml**（`profiles/web/node_modules/<bundle>/cordis.patch.yml`，link: 依赖是 junction 可直接读）——**不要凭包名推 id**（作者自定义，如 `dsh-better-sidebar→better-sidebar`、`@dsh-external/workflow→dsh-external-workflow` 无统一规则）。id 猜错无害：patch 仅告警 `entry not found`，不崩。
+- 已知限制：entry 的 bundle 归属按 dump 分节头「首次出现」记，patched-by 叠加显示可能错挂（如 restart-service 错挂 dsh-ssh-tunnel）——本机 160 entry 分类全对，但理论上可能误判；安全模式禁用错了表现为该插件仍在/误禁，用 --dump-config --patch 复核。
+
+### 11.3 插件管理弹窗（PluginManagerForm.cs）
+- 四源清单：package.json bundles（官方/外部）、dump-config 合成树（权威 entry + disabled 态）、cordis.patch.yml 用户层、**super-injector 注册表 `~/.dsh/super-injector/registry.json`**（运行时注入的 dev 插件，dump 看不到！dsh-topic-relay 白屏元凶就在此列）。
+- dev 插件启停 = registry 手术：禁用项移入 `registry.tray-disabled.json`（启用移回；首次手术自动备份 `registry.json.bak-tray`）。注入器重启按 registry 重注入 → 移出即禁用。
+- 「应用并重启 DSH」走托盘 DshRestart（进程外干净重启），避开会话内 restart 撞 3080 端口的已知坑。
+- 所有启停**重启 DSH 后生效**（cordis patch 不热重载）。
+
+### 11.4 自检开关（与 --dump-menu 同族）
+- `--selftest-plugins`：扫描清单 + 演练 patch 生成 → `selftest-plugins.txt`（官方/外部/注入分类与安全模式 count 核对）。
+- `--selftest-rpc`：DshAuth+DshRpc 打真实 3080 `session/list` → `selftest-rpc.txt`（`RPC OK session/list items=N`）。
+- `--selftest-lock`：检查/清除孤儿启动写锁 → `selftest-lock.txt`（before/action/after/result 四行，见 §11.6）。
+- `--selftest-exit`：探测两条退出信号是否都有监听者 → `selftest-exit.txt`（`keep` / `stopall` 两行 + `listener=YES/NO`，见 §11.7）。
+- `--selftest-svcmenu`：每模型二级菜单自检 → `selftest-svcmenu.txt`（状态映射矩阵 / 真实端口探测 / 每服务渲染 / 一级旧入口残留，见 §11.8）。
+  首行是 ASCII 锚点 `SVC MENU PROBE (...)`、并输出 `OLD-TOPLEVEL-ENTRIES = 0` —— 供 `apply-dsh-tray.cmd` 判定「源构建确实是新版」。
+- 所有诊断模式都不占单实例锁、不影响运行中托盘；从 bin 目录跑需先拷 `publish/dsh-tray-config.json` 到 exe 同目录（否则静态兜底通道）。
+- ⚠️ **诊断分支必须 return，永远不要落到 `Application.Run`**：漏写分支 + 该模式又跳过单实例锁 = 起出「没有锁的幽灵托盘」（通知区图标 + 永不退出 + 与真托盘抢菜单）。`Main` 末尾已加防御栏（命中任一诊断开关即 `ExitCode=3` 返回）。
+- ⚠️ **`TrayApp` 构造的 dumpMode 决定会不会建 `TaskbarWatcher`/冷启动重注册**（隐藏窗口 + 伴随线程，进程不会因 `Main` 返回而退出）。现统一传 `! _isPrimary`（诊断一律 true）——原写法漏了 `menuProbe`。
+
+### 11.5 子代理会话支持（2026-09-09 修复）
+- **报错**：点开子代理会话 → `session/agent-busy: subagent Sessions require their durable parent address`。根因：`session/page` 的 `SessionAddress` 有两种形态，`origin:'subagent'` 的会话**禁止**用 `{kind:'session'}` 直连，必须 `{kind:'subagent', parentSessionId, childSessionId, mode:'one-shot'|'continuable'}`（校验在 session-controller/src/history.ts validateAddress）。
+- **数据来源**：`session/list` items 自带 `origin`/`parentSessionId`/`projections.values.subagent.mode`（实测 468 个会话里 149 个是子代理）。注意子代理的 sessionId **没有 `session-` 前缀**，parentSessionId 有。
+- **prompt/cancel 不可用于子代理**：裸 sessionId 调 session/prompt 被拒 `session/agent-busy: owned by subagent routing`（子代理由父会话经 subagent delivery 驱动）→ 瘦客户端对子代理会话**只读**：输入框禁用 + 徽标「子代理」+ 隐藏中断按钮。
+- **fetchPage 三级错误恢复**：① `past cursor N` → 用 N 重试；② `mode does not match` → continuable/one-shot 互换重试一次（modeFixed 防刷新覆盖）；③ `durable parent address` 且本地无记录（列表未加载就直开）→ loadSessions 后用父地址重试。
+- JS 侧维护 `subInfo[sid]` 映射（从每次 list 响应登记，含 blank 过滤项），`addrFor(sid)` 统一出口地址。
+
+### 11.6 孤儿启动写锁自愈（2026-09-10）
+
+**故障**：`DshStart` 起 dsh 后，进程秒退，`dsh-web-err.log`：
+```
+Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\profiles\node_modules.lock
+    at withFileLock (packages/util/atomic-write/lib/index.js)
+    at healProfilesModuleFallback (packages/boot/app-boot/lib/index.js)
+    at composeProfile (apps/cli/lib/profile-boot-*.js)
+```
+
+**根因**：
+- dsh 的 `composeProfile` 每次启动都校验共享 module fallback（`$DSH_HOME/profiles/node_modules`）与当前安装依赖闭包是否一致；不一致就重写符号链接，并用 `profiles/node_modules.lock` 做跨进程互斥。
+- `packages/util/atomic-write` 的 `withFileLock` **按设计不回收陈旧锁**（源码注释原文：*the contender never removes an existing lock... orphan recovery is an operator action*），只等 2 秒。
+- 任何一次启动在持锁期间被杀（**托盘「停止 / 重启 DSH」用的就是 `Process.Kill()`**，关窗口同理），锁就永久留下 → 之后每次启动都 2s 超时崩。诊断：`cat` 该 lock（内容=持有者 pid）→ 查 pid 是否还存在。
+
+**处置（已内置，无需人工）**：
+- `HealProfileOrphanLock(bool log)`（Program.cs）：读 lock 里的 pid → `Process.GetProcessById` 探活 → **死 pid（含空/非数字内容）才 `File.Delete`**；活 pid **保留不动**（有实例正在重写软链，抢删会撞车）。`DshStart()` 在 `Process.Start` 之前调用一次（配置校验之后），日志写 `[lock] ...`。
+- DSH 菜单新增「检查/清除孤儿启动锁（node_modules.lock）」，手动一键复查。
+- 自检开关 `--selftest-lock` → `selftest-lock.txt`：
+  ```
+  lock: C:\Users\...\.dsh\profiles\node_modules.lock
+  before: present | absent
+  action: absent | orphan-removed pid=X | held pid=Y | error: ...
+  after:  present | absent
+  result: OK (no stale lock left) | KEPT (lock owner alive)
+  ```
+- **排障提醒**：报这个错**不要重装依赖/重装插件**。依赖层通常是好的——用 `node apps\cli\lib\bin.js --profile web --dump-config` 验证（EXIT=0 即合成链路健康；`--version` 不合成 profile，测不出该故障）。
+
+**同名同族的 dsh 侧兜底**（不在本仓库，防托盘没跑的场景）：
+- `G:\Tools\deepseek-harness\fix-dsh-lock.ps1`（逻辑同源，可用 PowerShell `-File` 单测）+ `fix-dsh-lock.cmd` 薄封装。
+- `dsh-web-server.cmd` 启动前 `call fix-dsh-lock.cmd /quiet`；`C:\Users\Landrom\bin\dsh.cmd` 加 `if exist <lock> call ...`；桌面 `fix-dsh-lock.cmd` 一键恢复。
+- ⚠️ 三处逻辑（C# / PS1 / .cmd）语义必须一致：**活 pid 保留、死 pid 删除**。改动任一处时同步另两处。
+
+### 11.7 退出语义 / `--exit`（默认保留模型）· `--exit --stopall`（2026-09-11 反转）
+
+**默认不可有破坏性**：`--exit` / 菜单「退出」= 只退托盘、**保留模型**；要停模型必须显式 `--stopall`。
+
+**两条互不干扰的退出信号**（`Main` 里用 `WaitHandle.WaitAny` 同时监听；`ExitSignalName(bool keepModel)`）：
+
+| 触发 | 事件名 | 行为 |
+|---|---|---|
+| `DSHTray.exe --exit`（默认）/ `--exit --nostop`（兼容别名）/ 菜单「退出」 / 菜单「重启托盘」 | `Local\DSH托盘_ExitSignal_NoStop` | `ExitApp(false)` → **不停模型** → 注销图标 → 退出 |
+| `DSHTray.exe --exit --stopall` / 菜单「退出（同时停止模型服务）」 | `Local\DSH托盘_ExitSignal` | `ExitApp(true)` → `StopAll()` **停模型** → 注销图标 → 退出 |
+
+- **两次语义翻转的历史**（老文档/老脚本按这个对号入座）：
+  - `2026-09-10b`：新增第二条信号，`--exit` 仍是"停模型"，保留模型要加 `--nostop`；
+  - `2026-09-11`：**默认反转** —— `--exit` 改为保留模型，停模型要 `--stopall`；`--nostop` 降级为兼容别名（等价默认，旧脚本原样可用）；菜单两项随之改名（`退出` / `退出（同时停止模型服务）`）。
+- **为什么两条信号名保持不变**：事件名与各自含义是**配套固定**的 —— `_ExitSignal` 恒为"停模型"、`_ExitSignal_NoStop` 恒为"保留模型"。因此反转默认值**只改发送端选哪条**，不改名字：老发送方（旧 `--exit` 想停模型）发 `_ExitSignal` → 新托盘照样停；旧发送方 `--nostop` 发 `_NoStop` → 新托盘照样保留。**跨版本两个方向都安全**（实测：新 exe 对老托盘发保留信号 → 老托盘听得懂，语义一致）。
+- **为什么不用 `taskkill /F` 保模型**：强杀能保住模型，但走的不是 `ExitApp` → `icon.Visible=false` 不执行 → 通知区留死图标槽，且老实例的 `svc.proc` 句柄丢失。信号退出是优雅退出：图标干净注销、模型照常服务、下次启动 `Adopt()` 接管。
+- 发送方会写 `exit-signal.txt`（放在 exe 同目录），并用**退出码**表态：`0`=信号已送达（有监听者）、`2`=没有托盘在跑（无人接收，纯 NOOP）。便于脚本判定。
+- 自检 `--selftest-exit` → `selftest-exit.txt`：
+  ```
+  EXIT SIGNAL PROBE  (Local\ session 命名事件)
+  semantics: --exit = keep model (default) | --exit --stopall = stop model too
+  keep    name=Local\DSH托盘_ExitSignal_NoStop  listener=YES (托盘在跑，信号可送达)
+  stopall name=Local\DSH托盘_ExitSignal         listener=NO  (无托盘监听)
+  ```
+- 例外：诊断开关和 `--exit` 都在**单实例锁之前**返回，天然可安全重复调用；`--exit [--stopall] --selftest-exit` 组合时**诊断优先**（只探测不发信号，实测未写 `exit-signal.txt`）。
+
+### 11.8 每模型二级菜单 + 「重启模型」不中断会话（2026-09-11）
+
+**一级项 = `<状态圆点> <模型名> (<端口>)`**（原一级的「启动 <模型> (端口)」与「打开 DSH 会话（<模型>）」合并进来，一级不再单列每模型入口 —— 用 `--selftest-svcmenu` 的 `OLD-TOPLEVEL-ENTRIES = 0` 判定）。
+
+**状态语义**（`Service.Start / PortBusy` + `SvcState/SvcDot/SvcEnable` 三个纯函数，便于枚举验证）：
+
+| 状态 | 判定 | 圆点 | 启动 | 重启 | 停止 |
+|---|---|---|---|---|---|
+| 未运行 | 无进程、端口无响应 | 红 | ✔ | ✔ | ✘ |
+| 启动中 | `Start()` 已拉起进程、`/health` 未就绪（`Starting=true`，Tick 每 2s 探活） | 黄 | ✘ | ✔ | ✔ |
+| 运行中 | `proc` 存活（本托盘启动或 `Adopt()` 接管） | 绿 | ✘ | ✔ | ✔ |
+| 运行中(未托管) | `proc` 为空但端口 `/health` UP（外部/上一实例启动、且接管失败，如权限降级） | 橙 | ✘ | ✔ | ✔ |
+
+- 就绪判定与实测：Tick 对「启动中」服务每 2s GET `/health`（`{"status":"ok"}`），就绪时记录耗时并 GET `/props` 写 `runCtx`/`runVision`；运行中服务每 10s 复采一次。**配置行里的「实测」就是它俩** —— 实测值可能与托盘配置不同（例：托盘 ctx=192K、实际服务端 256K）。
+- `Start()` 设 `Starting=true`；进程若秒退，Tick 判 `HasExited` → 清标志并提示（看日志窗口 / `model-start.log`）。
+- **「重启模型」= 只重启 llama-server**：`ReloadSvcConfig` → `Stop` → 等端口释放（≤6s）→ `Start`。
+  - `ReloadSvcConfig` **只读解析** `dsh-tray-config.json`（**绝不调用 `Config.Load()`** —— 它在文件缺失/无服务项时会**把默认配置写回文件**，会抹掉用户真实配置；`dsh-tray-config.json` 不在 git、不会自动重建）。按 `Name` 匹配、回退 `Port`，把 `Model/Port/UseMmproj/Mmproj/Batch/Ubatch/SpecDecode/Provider` 的差异逐条打进日志；同时 `LoadCfg()` 重读 `dsh-tray.cfg`（ctx/KV/切分/MTP/GPU/缓存内存/监听…）并 `RefreshChecks()`。
+  - **不碰 DSH(3080)** → dsh 会话（对话历史）不中断，仅"正在生成的那一轮"需重发。**端口不变时 dsh 侧无需改配置**；改了端口请点一次「启动 DSH 会话」重新校准 provider baseURL（§4）。
+  - `Stop` 兜底：`proc` 为空但端口有 llama → `KillByPort`（netstat → LISTENING pid → **进程名含 llama 才杀**），否则菜单会出现「端口被占却停不掉」的死角。
+- 「启动/重启/停止」三项**点击后不收起菜单**：`KeepOpenOnClick(dd, items)` 用 `Click` 先于 `Closing` 的顺序记标志位，再在 `Closing` 里 `e.Cancel`（只对这三项；会话入口照常收起）。不要用整段 `KeepOpen(dd)`（那会让会话入口也点不关）。
+- 子菜单**元素固定**（20 项：1 状态 + 1 分隔 + 2 会话 + 1 分隔 + 3 启停 + 1 分隔 + 1 标题 + 1 环境标题 + 2 环境项 + 1 llama 标题 + 6 配置行），运行期只改 `Text/Image/ToolTipText`，**绝不增删 `DropDownItems`**（菜单显示期间改结构会静默破坏弹出，§9）。
+- ⚠️ `ToolStripItem.Visible` 的 getter 在**父下拉从未显示过**时恒为 false —— 自检输出不要用 `it.Visible` 判空（原探针因此漏印 6 行配置），按原始文本打印。
+- ⚠️ 悬浮提示：`ContextMenuStrip.ShowItemToolTips` 需显式置 true（托盘已置）。
+- 自检 `--selftest-svcmenu` → `selftest-svcmenu.txt`：
+  ```
+  SVC MENU PROBE (ascii-anchor; svcmenus=3)          ← ASCII 锚点，供 .cmd 判定新版
+  === 状态映射矩阵 ===                                 四种 starting/running/busy 组合 → 圆点/状态文本/启停可用
+  === 真实端口探测（只读：Adopt + /health + /props）===   逐服务 health/是否接管/实测 ctx/视觉
+  === 每服务二级菜单（真实配置渲染）===
+  === 一级菜单是否残留每模型旧入口 ===  OLD-TOPLEVEL-ENTRIES = 0  (OK)
+  ```
