@@ -877,4 +877,91 @@ S2（`ServiceSpec`/`ServiceRuntime`，硬指标是 `cfgId` 不变）→ S3（抽
 | **S4** | `Cli` + `QwenTray.Tests` | `FP-REAL-8081` 已示范"纯逻辑可被断言驱动" |
 | **S5** | 拆 `TrayApp` → `ServiceManager` / `MenuBuilders` / `LogSink` | `Service` 的转发属性就是删除清单：到了 S5，把 10 个转发属性换成对 `Spec` 的直接访问即可，编译器会**逐处报错**指路（这正是转发布局比继承好的第二个理由） |
 
-> ⚠️ **一条 S2 暴露出来的版本控制事实**：S0/S1/S2 三轮改动**全部尚未提交**（`git status` 里 `Program.cs` 仍是 `D`、新文件全是 `??`）。这意味着 **git HEAD 停留在治理开始之前** —— 想回滚 S2 时**不能**用 `git checkout`，那会连 S0 的 `LogSink` 一起丢掉。本次的实际回滚点是 `~/.workbuddy/_backup/20260912_s2_spec/`（9 个源文件 + bench 前的台账快照，均已 sha256 校验）。**建议在 S3 开工前把 S0–S2 一起提交**，让 git 重新成为可用的回滚点。
+> ✅ **版本控制状态已收口（2026-09-12）**：S0/S1/S2 曾长期**全部未提交**（`git status` 里 `Program.cs` 是 `D`、新文件全是 `??`），那时 git HEAD 停留在治理开始之前 ⇒ 回滚**不能**用 `git checkout`（会连 S0 的 `LogSink` 一起丢）。现已按 3 个分层提交入库并在独立 worktree 上做过全新检出验证：
+>
+> | 提交 | 内容 | 验证 |
+> |---|---|---|
+> | `e667cb3` | S0+S1 | 在 pre-S2 状态下编译 0 错误 / 32 警告（= S1 记录基线） |
+> | `92d93f8` | S2 | 改动面精确命中预期的 8 文件 + `ServiceSpec.cs`，零越界 |
+> | `2100eba` | 文档 + `.gitignore` | — |
+>
+> 分层手法：S2 的回滚点里**恰好存着那 9 个文件的 pre-S2 版本**，于是"先铺回 pre-S2 → 提交 S0+S1 → 再铺回 post-S2 → 提交 S2"就能把两种状态都还原出来（靠 sha256 逐文件校验保证没有手滑）。收口后用 `git worktree add --detach` 在**独立目录**做了全新检出编译 + 跑满自检 —— 这一步专治"有没有文件忘了提交"，是 `git status` 看不见的风险。
+
+---
+
+## 12. S3 实施记录（2026-09-12）
+
+**一句话**：把无 UI 依赖的逻辑层搬进独立工程 `QwenTray.Core`，并把"Core 不许碰 UI"从**口头约定**变成**编译期围栏**。
+
+### 12.1 搬了什么（15 个文件，git 全部识别为 `rename` ⇒ 历史保留）
+
+| 归入 `src/QwenTray.Core/` | 说明 |
+|---|---|
+| `Config.cs` | JSON 配置契约 |
+| `ServiceSpec.cs` | S2 切出的配置描述 |
+| `LaunchArgs.cs` | 启动参数构建（S2 起只依赖 `ServiceSpec`） |
+| `PerfFingerprint.cs` / `PerfModel.cs` / `PerfSampler.cs` / `PerfStore.cs` / `PerfRuntime.cs` | 性能数据层（指纹 → 解析 → 模型 → 存储 → 采样/运行时） |
+| `LlamaLogParser.cs` / `BenchRunner.cs` | stdout 解析 / 命令行基准 |
+| `DshAuth.cs` / `DshRpc.cs` | dsh 认证与 RPC |
+| `GpuInfo.cs` / `HwInfo.cs` / `SysInfo.cs` | 硬件/系统采集（含 WMI，故 Core 仍带 `System.Management` 包） |
+
+**命名空间有意保持 `QwenTray` 不变** ⇒ 调用点**零改动**。本步只换程序集边界，不换名字；否则"零逻辑改动"这条就守不住了。
+
+**有意*未*搬（写下来是为了避免下一轮重复讨论）**：
+
+| 文件 | 不搬的理由 |
+|---|---|
+| `AutoStart.cs` | 真用 `Application.ExecutablePath`；且按 §5 目标架构它归 `Integr.` 而非 `Core` |
+| `Service.cs` | 持有 `Process` 句柄 + `LogSink`，是运行时状态袋（§5 的 `ServiceRuntime` 与 `Core` 是两块） |
+| `LogSink` / `UiDispatcher` / `PerfPanel` / `PerfProbe` | UI 或探针，属 `Ui` |
+
+### 12.2 围栏：`UseWindowsForms=false` —— 断言不是文档，是编译器
+
+Core 的 `.csproj` 里没有写"请不要引用 WinForms"这种注释当约定，而是把 `UseWindowsForms` 设为 `false`：此后 Core 内任何 `using System.Windows.Forms;` / `MessageBox.` / `Control` / `Application.` 都会直接 **CS0234 编译失败**。
+
+这条围栏**当场就抓到了东西**：S1 按类型切 `ModelPerf.cs` 时，切分器把原文那 17 行 `using` 块**复制进了每个文件**，于是 `Perf*` / `BenchRunner` / `LlamaLogParser` 里躺着 **14 行僵尸 using**（`System.Drawing` + `System.Windows.Forms`），而它们**一行都没用到**。S0–S2 三轮里主工程本来就引用 WinForms，所以这 14 行一直"合法地"躺着，没有一次编译器警告、没有一次人眼发现 —— 直到围栏把它们逼出来。本提交的 `48 insertions / 14 deletions`，那 14 处删除就是它们。
+
+**围栏自身也做了负向测试**（"测试你的测试"）：往 Core 的 `LaunchArgs.cs` 头部注入一行 `using System.Windows.Forms;` → 编译如期 `CS0234`。
+
+> ⚠️ **负向测试的第一次是假阳性，值得留档**：我第一版把 `using` **追加到文件末尾**，报的是 `CS1529`（using 子句位置错）—— **错了，但错对了**（"编译失败"这个判据被满足）。换个错因就"通过"了，等于没测。**负向测试的判据必须落在目标错因上**，否则它只证明了"随便改点什么都会编译不过"。
+
+### 12.3 子工程 `.csproj` 的坑：必须排**整个目录**
+
+主工程 `QwenTray.csproj` 需要把 Core 目录排除出自己的默认 glob：
+
+```xml
+<DefaultItemExcludes>$(DefaultItemExcludes);src/QwenTray.Core/**</DefaultItemExcludes>
+```
+
+**不能只排 `src/QwenTray.Core/*.cs`**：SDK 默认只排除**项目根**的 `bin`/`obj`，子工程的 `src/QwenTray.Core/obj/*.cs`（`AssemblyInfo` 那批 `Assembly*Attribute`）会被卷进主工程的编译，报 **CS0579「特性重复」**。这个坑 §9.5 已经在证据工程上踩过一次，本条是把那次教训**前移**成一条写进 csproj 的硬规则。
+
+### 12.4 验收：**同机同配置的差分法**
+
+改造前后各跑一遍**完全相同的命令集**，逐字节比对。这一步的价值不在于"跑通"，而在于**排除环境性失败**：
+
+| 验证 | 方法 | 结果 |
+|---|---|---|
+| 编译 | `dotnet build -c Release`（全量重建） | **0 错误 / 30 警告 = 基线**（Core 1 + 主体 29，只是重新分配，无新增） |
+| 10 项自检 + `--dump-menu` | 改造前后各跑一遍，`diff` | **实质内容逐字节一致**；差异只有时间戳与"已运行 2h59m→3h1m"这类时变量。`lock`/`exit`/`logsink`/`uithread`/`plugins`/`menushow`/`menu-dump` **完全相同** |
+| 数据可比性锚 | `--selftest-perf` + 真实 `--bench 8081` | `FP-REAL-8081 = PASS (966d1620a3)`；bench 打印 **`已记入台账 cfg=966d1620a3`**；台账仍 **17 条**、该配置 `runs` 2→3、无重复条目 |
+| 代码是"搬走"而非"复制两份" | 程序集体积（**独立通道**） | `DSHTray.dll` 345,088 → 286,720（−58,368）；`QwenTray.Core.dll` 64,512 ⇒ 量级吻合 |
+| 发布链可用 | 读回 `apply-dsh-tray.cmd`：`robocopy "%SRC%" "%PUB%" /E` | **整目录**同步 ⇒ 新增的 `QwenTray.Core.dll` 自动随发布带上，无需改脚本 |
+
+**两个"假警报"被差分法当场排除**（这正是先取基线的用处）：
+
+1. `--selftest-rpc` **改造前后同样**报 `RPC FAIL: 由于目标计算机积极拒绝 (127.0.0.1:3080)` —— 是 dsh web 当时没开，**环境性失败**。没有基线的话，这会被当成 S3 引入的回归去查半天。
+2. `--selftest-menushow` 曾超时一次（`exit=124`），但输出文件内容与基线一致。在两棵树**各复跑 3/3** 全部 `exit=0` ⇒ 抖动，非回归。
+
+### 12.5 两条可复用的结论
+
+1. **架构边界要用编译器表达，不要用文档表达。** `UseWindowsForms=false` 这一行比一页"编码约定"都硬 —— 它在 S3 落地当天就清掉了 14 行躺了三轮的死代码。凡是"某模块不许依赖 X"这类约束，优先找**能编译失败**的写法（关闭引用、独立 TFM、`BannedApiAnalyzers`），退而求其次才是文档 + 人工 review。
+2. **断言本身要有负向测试。** 正面用例只能证明"正常情况下它不拦"，证不了"该拦的时候它真拦"。而且负向测试的**判据要落在目标错因上**（§12.2 的 `CS1529` vs `CS0234` 假阳性）。
+
+### 12.6 尚未做（S4 起）
+
+| 步 | 内容 | 本次为它铺了什么 |
+|---|---|---|
+| **S4** | 抽 `Cli` + 建 `QwenTray.Tests`，给纯逻辑加单测（`LlamaLogParser` / `PerfFingerprint` / `Config` 合并语义 / `LaunchArgs.Build`） | **`QwenTray.Core` 现在就是一个可被引用、可被单测、且保证没有 UI 依赖的程序集** —— 这是加测试工程的前提条件，也是 S3 的真正目的 |
+| **S5** | 拆 `TrayApp` → `ServiceManager` / `MenuBuilders` / `LogSink` | `Service` 的 10 个转发属性就是删除清单（见 §11.6） |
+
+> **发布状态**：S3 纯内部结构改动，**对外行为零变化**（自检差分可证）。是否随发布上线都不影响功能；要上线仍需双击桌面 `apply-dsh-tray.cmd`（它会先跑 `--selftest-exit` + `--selftest-svcmenu` 验证 `publish-next` 确实是新版）。

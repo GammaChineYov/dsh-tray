@@ -333,9 +333,11 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
   === 一级菜单是否残留每模型旧入口 ===  OLD-TOPLEVEL-ENTRIES = 0  (OK)
   ```
 
-## 12. 源文件结构（2026-09-11 S1 按类型拆分后）
+## 12. 源文件结构（2026-09-11 S1 按类型拆分 → 2026-09-12 S3 分工程）
 
 > 拆分是**零逻辑改动**的（`partial` 对编译器是同一类型），但**改代码前必须先找对文件** —— 原来全挤在 `Program.cs` 里的东西现在按职责分了 20 个文件。原文行号对照见 `docs/2026-09-11-architecture-governance.md` §10.1。
+>
+> ⚠️ **S3 起有两个工程**：无 UI 依赖的逻辑层已搬进 `src/QwenTray.Core/`（下表中标 **〔Core〕** 的行）。**加新文件前先想清楚它属于哪边** —— 放进 Core 而它引用了 WinForms，会直接编译失败（这是故意的，见 §12.1）。
 
 | 文件 | 职责 | 关键内容 |
 |---|---|---|
@@ -348,11 +350,41 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
 | `LogForm.cs` | 统一日志窗口 | 单窗口双页签 + 工具栏 + 时间戳规则（`Append`/`AppendDsh`/`AppendDshStamp`/`Trim`） |
 | `SvcMenu.cs` | 每模型二级菜单的数据壳 | 纯字段容器（原 `TrayApp` 私有嵌套类 → 顶层 `internal`） |
 | `UiDispatcher.cs` / `LogSink.cs` / `SelfTests.cs` | S0 基础设施 | UI marshal 锚点 / 有界日志缓冲 / 自检实现 |
-| `Perf*.cs`（9 个） | 性能日志 | 数据流：`PerfFingerprint`(指纹) → `LlamaLogParser`(stdout 解析) → `PerfModel`(数据模型) → `PerfStore`(存储+闸门) → `PerfSampler`/`BenchRunner`/`PerfRuntime` → `PerfPanel`(UI) → `PerfProbe`(自检) |
-| `ServiceSpec.cs` | **配置描述**（S2 切出） | 10 个配置字段 + `ServiceSpec.From(ServiceConfig)` 唯一构造入口。**不引用** `Process`/WinForms ⇒ S3 抽 Core 的第一块砖 |
-| `Service.cs` | **运行时状态袋** | 组合 `Spec` + `proc`/`log`/`Starting`/`runCtx` 等。10 个转发属性（`Name`/`Port`/`Model`…）是迁移期兼容层，**也是 S5 的删除清单** —— 到时改成直接访问 `Spec`，编译器会逐处报错指路 |
-| `Config.cs` / `LaunchArgs.cs` | JSON 配置契约 / 启动参数构建 | `LaunchArgs.Build` **只依赖 `ServiceSpec`**（S2 起） |
+| `src/QwenTray.Core/Perf*.cs`（5 个）〔Core〕 | 性能**数据层** | `PerfFingerprint`(指纹) → `LlamaLogParser`(stdout 解析) → `PerfModel`(数据模型) → `PerfStore`(存储+闸门) → `PerfSampler`/`PerfRuntime` |
+| `PerfPanel.cs` / `PerfProbe.cs` | 性能**UI 与自检**（留在主工程） | `PerfPanel` 是页签 UI；`PerfProbe` 是 `--selftest-perf` 的探针实现（含 `FP-REAL-8081` 回归锚） |
+| `src/QwenTray.Core/ServiceSpec.cs`〔Core〕 | **配置描述**（S2 切出） | 10 个配置字段 + `ServiceSpec.From(ServiceConfig)` 唯一构造入口。**不引用** `Process`/WinForms` |
+| `Service.cs` | **运行时状态袋**（留在主工程） | 组合 `Spec` + `proc`/`log`/`Starting`/`runCtx` 等。10 个转发属性（`Name`/`Port`/`Model`…）是迁移期兼容层，**也是 S5 的删除清单** —— 到时改成直接访问 `Spec`，编译器会逐处报错指路 |
+| `src/QwenTray.Core/Config.cs` / `LaunchArgs.cs`〔Core〕 | JSON 配置契约 / 启动参数构建 | `LaunchArgs.Build` **只依赖 `ServiceSpec`**（S2 起） |
 | `ThinChatForm.cs` / `PluginCenter.cs` / `PluginManagerForm.cs` | 内置渲染 / 插件中心 / 插件管理弹窗 | |
-| `DshAuth.cs` / `DshRpc.cs` / `AutoStart.cs` / `HwInfo.cs` / `SysInfo.cs` / `GpuInfo.cs` | 无 UI 依赖的工具类 | S3 抽 `QwenTray.Core` 的首要候选（编译期要卡住"不引用 `System.Windows.Forms`"） |
+| `src/QwenTray.Core/DshAuth.cs` / `DshRpc.cs` / `HwInfo.cs` / `SysInfo.cs` / `GpuInfo.cs` / `BenchRunner.cs`〔Core〕 | 无 UI 依赖的工具类 | S3 已收纳（Core 编译期不许引用 `System.Windows.Forms`） |
+| `AutoStart.cs` | 开机自启（留在主工程） | 真用 `Application.ExecutablePath` ⇒ **不能进 Core**；按目标架构它归 `Integr.` 而非 `Core`（报告 §12.1） |
 
-**回滚**：`Program.cs.bak-s1` / `ModelPerf.cs.bak-s1` 是这两个文件的前身（`.cs.bak-*` 后缀不被 SDK 编译）；回滚 = 删掉 20 个新文件 + 把这两个改名回去。
+**回滚（S1 结构拆分）**：`Program.cs.bak-s1` / `ModelPerf.cs.bak-s1` 是这两个文件的前身（`.cs.bak-*` 后缀不被 SDK 编译）；回滚 = 删掉 20 个新文件 + 把这两个改名回去。
+
+### 12.1 两个工程（S3，2026-09-12）
+
+```
+dsh-chat-popup/
+├─ QwenTray.csproj          ← DSHTray.exe（WinForms 托盘，UseWindowsForms=true）
+│  └─ *.cs（21 个：TrayApp 5 个 partial / Program2 / LogForm / UiDispatcher / Service / …）
+│     └─ ProjectReference ──┐
+└─ src/QwenTray.Core/       │
+   ├─ QwenTray.Core.csproj ─┘  ← QwenTray.Core.dll（UseWindowsForms=false）
+   └─ *.cs（15 个：Config / ServiceSpec / LaunchArgs / Perf 数据层 / DshAuth / DshRpc / 硬件采集）
+```
+
+**命名空间两边都是 `QwenTray`**（只是程序集不同）⇒ 调用点零改动。
+
+**构建/发布不变**：`dotnet build -c Release` 会先编 Core 再编主工程；`dotnet publish -c Release -o publish-next` 产物里会多一个 `QwenTray.Core.dll`。`apply-dsh-tray.cmd` 用的是 `robocopy /E` **整目录**同步，**不需要改脚本**。
+
+**两条必须知道的规则**：
+
+1. **Core 不许引用 WinForms** —— 由 `UseWindowsForms=false` 在编译期强制（引用了就 `CS0234`，不是警告、不是约定）。不要把某个文件搬进 Core 后再把开关打开去迁就它；那个文件属于 Ui 侧。
+   *附带收益*：这条围栏在 S3 落地当天就清出了 S1 切分时**复制进每个文件**的 14 行僵尸 `using`（`System.Drawing` + `System.Windows.Forms`）。详见报告 §12.2。
+2. **主工程排除 Core 目录必须排整个目录**：
+   ```xml
+   <DefaultItemExcludes>$(DefaultItemExcludes);src/QwenTray.Core/**</DefaultItemExcludes>
+   ```
+   只排 `*.cs` 会让子工程 `obj/*.cs`（`AssemblyInfo` 那批）卷进主编译，报 **CS0579「特性重复」**（报告 §9.5 / §12.3）。
+
+**S3 的改造验收（同机同配置差分法）**：改造前后各跑一遍 `--selftest-*` 全套 + `--dump-menu`，逐字节比对 ⇒ 实质内容一致；`FP-REAL-8081 = PASS (966d1620a3)`；真实 `--bench 8081` 打印 `已记入台账 cfg=966d1620a3`，台账 17 条不新增。基线留档 `~/.workbuddy/_backup/20260912_s3_baseline/`。
