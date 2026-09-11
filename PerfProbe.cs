@@ -48,6 +48,14 @@ public static class PerfProbe {
       Ck("FP-TS-CHANGES",   id1!=id3, id1+" vs "+id3);
       Ck("FP-EXE-VERSION",  id1!=id4, id1+" vs "+id4);
 
+      // 1b) 真实配置回归锚（2026-09-12 S2 加入）：当前跑在 8081 的 Qwen3.6-35B 配置必须仍算出同一个 cfgId。
+      //     这串 args 抄自 ~/.dsh/tools/model-perf/configs.json 里 id=966d1620a3 那条的台账原文。
+      //     任何改动 PerfFingerprint 归一化/剔除规则、或 LaunchArgs 参数构造的行为变化都会在这里撞线
+      //     —— cfgId 一变，历史样本就与台账对不上，"哪套配置更快"这个核心问题就失去可比性。
+      var realArgs=new List<string>{"-m",@"E:\llm-deploy\models\Qwen3.6-35B-A3B-Claude-4.7-Opus-Reasoning-Distilled-APEX-MTP-I-Compact.gguf","-c","262144","-ngl","99","--split-mode","tensor","-ts","50,50","--main-gpu","0","--flash-attn","on","--cache-type-k","q8_0","--cache-type-v","q8_0","-b","1024","-ub","1024","--cont-batching","--cache-ram","2048","--port","8081","--host","0.0.0.0","--reasoning","on","--reasoning-format","deepseek","--jinja","--temp","0.6","--top-p","0.95","--top-k","20","--min-p","0.0","--presence-penalty","0.0","--repeat-penalty","1.0"};
+      string realId=PerfFingerprint.Compute(realArgs,exe);
+      Ck("FP-REAL-8081",    realId=="966d1620a3", realId);
+
       // 2) 参数归一化（-1 是值、flag 不吞下一个选项、--port 被剔除）
       var nrm=PerfFingerprint.Normalize(a1);
       Ck("NORM-NEG-VALUE",  nrm.Any(kv=>kv.Key=="--cache-ram"&&kv.Value=="-1"));
@@ -94,16 +102,16 @@ public static class PerfProbe {
       var svc=new Service{ Name="probe-svc", Port=8081, Model=@"E:\models\X.gguf" };
       var lr=new LaunchResult(); lr.args=a1; lr.envCuda="0,1"; lr.envAllreduce="internal";
       bool inw;
-      string cid=rt.OnStart(svc, lr, exe, out inw);
+      string cid=rt.OnStart(svc.Spec, lr, exe, out inw);
       Ck("RT-ONSTART",      cid==id1 && !inw);
       Ck("RT-PENDING",      rt.PendingCfg(8081)==id1);
-      rt.OnReady(svc, 42100, 262144, "b1-832fd6f");
+      rt.OnReady(svc.Spec, 42100, 262144, "b1-832fd6f");
       Ck("RT-PENDING-CLEAR",rt.PendingCfg(8081)==null);
       var ent=st.Get(id1)!;
       Ck("RT-LOADMS",       ent.loadLast==42, ent.loadLast+"s");
       Ck("RT-BUILD",        ent.llamaBuild=="b1-832fd6f");
       Ck("RT-RUNS",         ent.runs==2, "runs="+ent.runs);
-      rt.OnLlamaLine(svc, "llama_perf_context_print:        eval time =    2404.48 ms /   158 tokens (   15.22 ms per token,    65.71 tokens per second)");
+      rt.OnLlamaLine(svc.Spec, "llama_perf_context_print:        eval time =    2404.48 ms /   158 tokens (   15.22 ms per token,    65.71 tokens per second)");
       rt.Flush();
       Ck("RT-FEED-FLUSH",   st.TailSamples(50).Count==3, "lines="+st.TailSamples(50).Count);
 

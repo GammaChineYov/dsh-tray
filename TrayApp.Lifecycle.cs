@@ -30,7 +30,7 @@ public partial class TrayApp {
     if(!adopted){ adopted=true; Task.Run(()=>{ foreach(var s in services) Adopt(s); }); }
     // —— 模型状态巡检（1s 纯内存判断；每 2s 一次后台探活）——
     // 进程已退出但还挂着「启动中」→ 判定启动失败；「启动中」→ /health 就绪后清标志并记录耗时；运行中 → /props 实测 ctx/视觉
-    foreach(var s in services){ bool ex=false; try{ if(s.proc!=null) ex=s.proc.HasExited; }catch{} if(ex&&s.Starting){ s.Starting=false; s.startMs=0; logForm.Append("["+s.Name+"] 进程已退出（启动失败？见日志窗口 / model-start.log）\r\n"); try{ perf?.OnFail(s,"exit"); }catch{} } }
+    foreach(var s in services){ bool ex=false; try{ if(s.proc!=null) ex=s.proc.HasExited; }catch{} if(ex&&s.Starting){ s.Starting=false; s.startMs=0; logForm.Append("["+s.Name+"] 进程已退出（启动失败？见日志窗口 / model-start.log）\r\n"); try{ perf?.OnFail(s.Spec,"exit"); }catch{} } }
     svcTick++;
     if(svcTick%2==0){
       bool anyStarting=services.Any(s=>s.Starting);
@@ -43,7 +43,7 @@ public partial class TrayApp {
                 var pr=ProbeLlamaProps(t.svc.Port); if(pr.Item1>0) t.svc.runCtx=pr.Item1; if(pr.Item2.HasValue) t.svc.runVision=pr.Item2.Value?1:0;
                 long used=(ms>0?Math.Max(0,(Environment.TickCount-ms)/1000):0);
                 logForm.Append("["+t.svc.Name+"] 已就绪（端口 "+t.svc.Port+"，耗时 "+used+"s）\r\n");
-                try{ perf?.OnReady(t.svc, ms, pr.Item1, ProbeBuildInfo(t.svc.Port)); }catch{} }
+                try{ perf?.OnReady(t.svc.Spec, ms, pr.Item1, ProbeBuildInfo(t.svc.Port)); }catch{} }
             } else if(t.running){
               var pr=ProbeLlamaProps(t.svc.Port); if(pr.Item1>0) t.svc.runCtx=pr.Item1; if(pr.Item2.HasValue) t.svc.runVision=pr.Item2.Value?1:0;
             } else {

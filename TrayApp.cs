@@ -72,8 +72,7 @@ public partial class TrayApp : ApplicationContext {
   public TrayApp(bool dumpMode=false){
     cfg=Config.Load();
     foreach(var sc in cfg.Services){ if(!sc.Enabled) continue;
-      var svc=new Service{Name=sc.Name,Port=sc.Port,Model=sc.Model,UseMmproj=sc.UseMmproj,Mmproj=sc.Mmproj,SpecDecode=sc.SpecDecode,Provider=sc.Provider};
-      if(sc.Batch>0) svc.Batch=sc.Batch; if(sc.Ubatch>0) svc.Ubatch=sc.Ubatch;
+      var svc=new Service{ Spec=ServiceSpec.From(sc) };
       services.Add(svc);
     }
     gpus=GpuInfo.Discover();

@@ -36,7 +36,7 @@ public class PerfRuntime {
   }
 
   // 启动瞬间：算指纹 + 登记台账（性能数据等就绪/失败时再落）
-  public string OnStart(Service svc, LaunchResult build, string exePath, out bool isNew){
+  public string OnStart(ServiceSpec svc, LaunchResult build, string exePath, out bool isNew){
     isNew=false;
     try{
       string id=PerfFingerprint.Compute(build.args, exePath);
@@ -57,7 +57,7 @@ public class PerfRuntime {
   public string? PendingCfg(int port){ lock(_gate){ return _pending.TryGetValue(port, out var s)?s:null; } }
 
   // 就绪：落 start 样本 + 补加载耗时 / 实测 ctx / build_info
-  public void OnReady(Service svc, long loadMs, int servedCtx, string? llamaBuild){
+  public void OnReady(ServiceSpec svc, long loadMs, int servedCtx, string? llamaBuild){
     string? id; lock(_gate){ _pending.TryGetValue(svc.Port, out id); _pending.Remove(svc.Port); }
     if(string.IsNullOrEmpty(id)) return;
     try{
@@ -73,7 +73,7 @@ public class PerfRuntime {
   }
 
   // 启动失败/进程退出：同样落一条，失败经验也要留痕
-  public void OnFail(Service svc, string result){
+  public void OnFail(ServiceSpec svc, string result){
     string? id; lock(_gate){ _pending.TryGetValue(svc.Port, out id); _pending.Remove(svc.Port); }
     if(string.IsNullOrEmpty(id)) return;
     try{
@@ -83,7 +83,7 @@ public class PerfRuntime {
   }
 
   // llama stdout 每行：解析 perf 行喂给聚合器（小时窗口 → 中位数）
-  public void OnLlamaLine(Service svc, string? line){
+  public void OnLlamaLine(ServiceSpec svc, string? line){
     if(string.IsNullOrEmpty(line)) return;
     if(line.IndexOf("eval time", StringComparison.OrdinalIgnoreCase)<0) return;   // 快速短路，绝大多数行在这里就返回
     string? id=PendingCfg(svc.Port);

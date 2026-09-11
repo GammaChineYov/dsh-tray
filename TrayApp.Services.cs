@@ -98,7 +98,7 @@ public partial class TrayApp {
     var en=SvcEnable(starting,running,busy);
     m.start.Enabled=en.start; m.stop.Enabled=en.stop; m.restart.Enabled=en.restart;
     // —— 运行时配置：环境配置 + llama.cpp 配置（按当前参数实时算；运行中叠加 /props 实测）——
-    var b=LaunchArgs.Build(svc,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll,mtpLevel);
+    var b=LaunchArgs.Build(svc.Spec,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll,mtpLevel);
     m.envCuda.Text="    CUDA_VISIBLE_DEVICES = "+(b.envCuda.Length>0?b.envCuda:"（未设置）");
     m.envAllreduce.Text="    GGML_CUDA_ALLREDUCE = "+(b.envAllreduce.Length>0?b.envAllreduce:"（未设置）");
     var lines=SvcCfgLines(svc,running,b);
@@ -138,12 +138,12 @@ public partial class TrayApp {
   void Start(Service svc){
     if(svc.Running){ Log(svc,svc.Name+" 已在运行 (端口 "+svc.Port+")\r\n"); Ui(()=>RefreshSvcMenus()); return; }
     if(PortUp(svc.Port)){ Log(svc,"端口 "+svc.Port+" 已有服务在跑（非本应用启动），请先「停止模型」或停用外部进程。\r\n"); Ui(()=>RefreshSvcMenus()); return; }
-    var build=LaunchArgs.Build(svc,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll,mtpLevel);
+    var build=LaunchArgs.Build(svc.Spec,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll,mtpLevel);
     var psi=new ProcessStartInfo(cfg.LlamaServerExe,string.Join(" ",build.args)){UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true,CreateNoWindow=true};
     if(build.envCuda.Length>0) psi.Environment["CUDA_VISIBLE_DEVICES"]=build.envCuda;
     if(build.envAllreduce.Length>0) psi.Environment["GGML_CUDA_ALLREDUCE"]=build.envAllreduce; // 多卡张量并行需要内置 CUDA AllReduce
     try{
-      svc.proc=Process.Start(psi); svc.proc.OutputDataReceived+=(o,e)=>{if(e.Data!=null){svc.log.AppendLine(e.Data); try{ perf?.OnLlamaLine(svc,e.Data); }catch{}}}; svc.proc.ErrorDataReceived+=(o,e)=>{if(e.Data!=null)svc.log.AppendLine("[err] "+e.Data);}; svc.proc.BeginOutputReadLine(); svc.proc.BeginErrorReadLine();
+      svc.proc=Process.Start(psi); svc.proc.OutputDataReceived+=(o,e)=>{if(e.Data!=null){svc.log.AppendLine(e.Data); try{ perf?.OnLlamaLine(svc.Spec,e.Data); }catch{}}}; svc.proc.ErrorDataReceived+=(o,e)=>{if(e.Data!=null)svc.log.AppendLine("[err] "+e.Data);}; svc.proc.BeginOutputReadLine(); svc.proc.BeginErrorReadLine();
       svc.Starting=true; svc.startMs=Environment.TickCount; svc.runCtx=0; svc.runVision=-1;   // 启动中 → Tick 里 /health 探活，就绪后清标志
       Log(svc,">>> 启动 "+svc.Name+" (端口 "+svc.Port+")\r\n");
       Log(svc,"    GPU="+gpuSel.Describe(gpus)+" | ctx="+(ctxVal/1024)+"K | CUDA_VISIBLE_DEVICES="+(build.envCuda.Length>0?build.envCuda:"-")+" | 参数组="+(paramMode==0?"通用思考":paramMode==1?"编码思考":"Instruct")+" | 切分="+(splitMode==0?"按层 layer":splitMode==1?"张量并行 tensor("+tsGpu1+"%)":"-")+" | KV="+KvLabel(kvMode)+" | 缓存内存="+CacheRamLabel(cacheRam)+" | MTP="+MtpLabel(mtpLevel)+" | 监听="+(bindAll?"0.0.0.0":"127.0.0.1")+"\r\n");
@@ -154,7 +154,7 @@ public partial class TrayApp {
       Log(svc,"    命令: "+cmdLine+"\r\n");
       try{
         bool isNewCfg=false; string cfgId="";
-        if(perf!=null) cfgId=perf.OnStart(svc,build,cfg.LlamaServerExe,out isNewCfg);
+        if(perf!=null) cfgId=perf.OnStart(svc.Spec,build,cfg.LlamaServerExe,out isNewCfg);
         // 台账里首次出现的配置才写人类可读的一行；重复启动不再累积（原写法每次启动都追加 → 反复试参就膨胀）
         if(perf==null||isNewCfg) File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"model-start.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+" ["+svc.Name+"] "+cmdLine+"\r\n");
         if(cfgId.Length>0) Log(svc,"    性能台账: cfg "+cfgId+(isNewCfg?"（新配置，已登记台账）":"（已有配置，累加启动次数）")+"\r\n");
