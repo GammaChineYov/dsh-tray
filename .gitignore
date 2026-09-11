@@ -12,3 +12,6 @@ webview-userdata/
 *.bak-*
 *.bak
 
+# 一次性迁移脚本与探针留档（临时产物，按工程约定放 docs/temp/ 且不入库）
+docs/temp/
+

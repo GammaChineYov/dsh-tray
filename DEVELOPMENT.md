@@ -125,7 +125,7 @@ Start-Process -FilePath .\publish\DSHTray.exe -WorkingDirectory .\publish
   想把模型一起停掉才用 `--exit --stopall`（桌面 `dsh-tray-exit-stop-model.cmd`）。
   ⚠️ 版本 ≥ 2026-09-10b 且 < 2026-09-11 的构建里，`--exit` 旧语义是**停模型**，那时保留模型要 `--exit --nostop`
   （该别名现在仍被接受，但已等价默认）；再旧的版本没有这个开关，只能 `Stop-Process -Force`。
-- 本机验证出口：--dump-menu（结构）、--selftest-svcmenu（每模型二级菜单：状态映射矩阵 + 运行时配置渲染 + 一级旧入口残留检查，§11.8）、--selftest-logwin（DSH 日志窗口）、--selftest-lock（孤儿写锁判定，§11.6）、--selftest-exit（退出信号监听者探测，§11.7）、单实例双启=1 进程。
+- 本机验证出口：--dump-menu（结构）、--selftest-svcmenu（每模型二级菜单：状态映射矩阵 + 运行时配置渲染 + 一级旧入口残留检查，§11.8）、--selftest-logwin（DSH 日志窗口）、--selftest-lock（孤儿写锁判定，§11.6）、--selftest-exit（退出信号监听者探测，§11.7）、--selftest-uithread（UI 调度锚点「排队语义」断言）、--selftest-logsink（有界日志缓冲）、单实例双启=1 进程。
 
 **上线脚本 `apply-dsh-tray.cmd`（桌面）现在用优雅退出而非强杀**（2026-09-11）：先 `publish\DSHTray.exe --exit --nostop`（`--nostop` 在新旧构建里都表示「保留模型」→ 跨版本安全）等它自己退，最多等 12s，超时才 `taskkill /F` 兜底。好处：走 `ExitApp` → 图标正常注销（不留死图标槽）、模型完全不被碰。
 
@@ -228,6 +228,8 @@ WinForms 下拉显示是模态且状态敏感——显示期间对 DropDownItems
 - `--selftest-lock`：检查/清除孤儿启动写锁 → `selftest-lock.txt`（before/action/after/result 四行，见 §11.6）。
 - `--selftest-exit`：探测两条退出信号是否都有监听者 → `selftest-exit.txt`（`keep` / `stopall` 两行 + `listener=YES/NO`，见 §11.7）。
 - `--selftest-svcmenu`：每模型二级菜单自检 → `selftest-svcmenu.txt`（状态映射矩阵 / 真实端口探测 / 每服务渲染 / 一级旧入口残留，见 §11.8）。
+- `--selftest-uithread`：UI 线程调度自检 → `selftest-uithread.txt`（**实例**探针 —— 需要一个"已创建但未 Show"的 `LogForm`，那正是 P0-1 的触发场景；判别力核心 = "消息泵未跑时，后台线程发起的 UI 更新**必须还没生效**"；另含 RichTextBox 上限裁剪。改造记录见 `docs/2026-09-11-architecture-governance.md` §9）。
+- `--selftest-logsink`：日志缓冲自检 → `selftest-logsink.txt`（纯数据层，不建 TrayApp、不占单实例锁：8 线程 × 2 万行并发写 / `Length` 守恒 / 窗口有界 / 旧游标夹取 / 单行超上限仍保留 / `Clear` 不重置游标）。
   首行是 ASCII 锚点 `SVC MENU PROBE (...)`、并输出 `OLD-TOPLEVEL-ENTRIES = 0` —— 供 `apply-dsh-tray.cmd` 判定「源构建确实是新版」。
 - 所有诊断模式都不占单实例锁、不影响运行中托盘；从 bin 目录跑需先拷 `publish/dsh-tray-config.json` 到 exe 同目录（否则静态兜底通道）。
 - ⚠️ **诊断分支必须 return，永远不要落到 `Application.Run`**：漏写分支 + 该模式又跳过单实例锁 = 起出「没有锁的幽灵托盘」（通知区图标 + 永不退出 + 与真托盘抢菜单）。`Main` 末尾已加防御栏（命中任一诊断开关即 `ExitCode=3` 返回）。
@@ -330,3 +332,27 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
   === 每服务二级菜单（真实配置渲染）===
   === 一级菜单是否残留每模型旧入口 ===  OLD-TOPLEVEL-ENTRIES = 0  (OK)
   ```
+
+## 12. 源文件结构（2026-09-11 S1 按类型拆分后）
+
+> 拆分是**零逻辑改动**的（`partial` 对编译器是同一类型），但**改代码前必须先找对文件** —— 原来全挤在 `Program.cs` 里的东西现在按职责分了 20 个文件。原文行号对照见 `docs/2026-09-11-architecture-governance.md` §10.1。
+
+| 文件 | 职责 | 关键内容 |
+|---|---|---|
+| `Program2.cs` | **入口** | `Main` + 全部诊断/自检开关分派、单实例互斥、两条退出信号监听 |
+| `TrayApp.cs` | 托盘骨架（partial 1/5） | 全部字段声明、`TrayApp()` 构造函数（建菜单/图标/`clock`）、`dsh-tray.cfg` 读写（`Cfg`/`LoadCfg`/`SaveCfg`/`SaveAllPos`）、`RefreshChecks`、显存分摊提示 |
+| `TrayApp.Services.cs` | 模型服务（partial 2/5） | `PortUp`/`HealthUp`/`KillByPort`、`BuildSvcMenu`/`RefreshSvcMenu`（每模型二级菜单）、`Start`/`Stop`/`StopAll`/`RestartSvc`/`ReloadSvcConfig` |
+| `TrayApp.Dsh.cs` | DSH 与日志（partial 3/5） | `DshUp`/`DshStart`/`DshStop`/`DshRestart`、`ScrubWorkBuddyEnv`/`StripWorkBuddyShim`（崩溃链 A 修复）、`TailLog`/`ClearDshLogFiles`/`OpenDshLog`、`Bg`/`Ui`/`ReportEx`（S0 调度器入口） |
+| `TrayApp.Sessions.cs` | 会话与弹窗（partial 4/5） | `UiThreadProbe`（S0 自检）、dsh 配置 YAML 读写（`ExtractBlock`/`ReplaceBlock`/`EnsureLlamaProvider`）、`OpenPop`/`OpenThin`/`OpenOfficial`、插件管理入口、最近会话（`ReadRecent`/`RebuildRecentMenu`/`DotFor`） |
+| `TrayApp.Lifecycle.cs` | 生命周期与自检（partial 5/5） | `Adopt`（接管外部 llama）、`Tick`（1s 节拍）、`ExitApp`/`ExitFromSignal`/`RestartTray`、全部 `*Probe()` 自检入口 |
+| `LogForm.cs` | 统一日志窗口 | 单窗口双页签 + 工具栏 + 时间戳规则（`Append`/`AppendDsh`/`AppendDshStamp`/`Trim`） |
+| `SvcMenu.cs` | 每模型二级菜单的数据壳 | 纯字段容器（原 `TrayApp` 私有嵌套类 → 顶层 `internal`） |
+| `UiDispatcher.cs` / `LogSink.cs` / `SelfTests.cs` | S0 基础设施 | UI marshal 锚点 / 有界日志缓冲 / 自检实现 |
+| `Perf*.cs`（9 个） | 性能日志 | 数据流：`PerfFingerprint`(指纹) → `LlamaLogParser`(stdout 解析) → `PerfModel`(数据模型) → `PerfStore`(存储+闸门) → `PerfSampler`/`BenchRunner`/`PerfRuntime` → `PerfPanel`(UI) → `PerfProbe`(自检) |
+| `ServiceSpec.cs` | **配置描述**（S2 切出） | 10 个配置字段 + `ServiceSpec.From(ServiceConfig)` 唯一构造入口。**不引用** `Process`/WinForms ⇒ S3 抽 Core 的第一块砖 |
+| `Service.cs` | **运行时状态袋** | 组合 `Spec` + `proc`/`log`/`Starting`/`runCtx` 等。10 个转发属性（`Name`/`Port`/`Model`…）是迁移期兼容层，**也是 S5 的删除清单** —— 到时改成直接访问 `Spec`，编译器会逐处报错指路 |
+| `Config.cs` / `LaunchArgs.cs` | JSON 配置契约 / 启动参数构建 | `LaunchArgs.Build` **只依赖 `ServiceSpec`**（S2 起） |
+| `ThinChatForm.cs` / `PluginCenter.cs` / `PluginManagerForm.cs` | 内置渲染 / 插件中心 / 插件管理弹窗 | |
+| `DshAuth.cs` / `DshRpc.cs` / `AutoStart.cs` / `HwInfo.cs` / `SysInfo.cs` / `GpuInfo.cs` | 无 UI 依赖的工具类 | S3 抽 `QwenTray.Core` 的首要候选（编译期要卡住"不引用 `System.Windows.Forms`"） |
+
+**回滚**：`Program.cs.bak-s1` / `ModelPerf.cs.bak-s1` 是这两个文件的前身（`.cs.bak-*` 后缀不被 SDK 编译）；回滚 = 删掉 20 个新文件 + 把这两个改名回去。
