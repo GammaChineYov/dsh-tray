@@ -333,15 +333,16 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
   === 一级菜单是否残留每模型旧入口 ===  OLD-TOPLEVEL-ENTRIES = 0  (OK)
   ```
 
-## 12. 源文件结构（2026-09-11 S1 按类型拆分 → 2026-09-12 S3 分工程）
+## 12. 源文件结构（2026-09-11 S1 按类型拆分 → 09-12 S3 分工程 → S4 加测试）
 
 > 拆分是**零逻辑改动**的（`partial` 对编译器是同一类型），但**改代码前必须先找对文件** —— 原来全挤在 `Program.cs` 里的东西现在按职责分了 20 个文件。原文行号对照见 `docs/2026-09-11-architecture-governance.md` §10.1。
 >
-> ⚠️ **S3 起有两个工程**：无 UI 依赖的逻辑层已搬进 `src/QwenTray.Core/`（下表中标 **〔Core〕** 的行）。**加新文件前先想清楚它属于哪边** —— 放进 Core 而它引用了 WinForms，会直接编译失败（这是故意的，见 §12.1）。
+> ⚠️ **S3/S4 起有三个工程**：无 UI 依赖的逻辑层在 `src/QwenTray.Core/`（下表标 **〔Core〕** 的行），单测在 `tests/QwenTray.Tests/`。**加新文件前先想清楚它属于哪边** —— 放进 Core 而它引用了 WinForms，会直接编译失败（这是故意的，见 §12.1）。
 
 | 文件 | 职责 | 关键内容 |
 |---|---|---|
-| `Program2.cs` | **入口** | `Main` + 全部诊断/自检开关分派、单实例互斥、两条退出信号监听 |
+| `Program2.cs` | **入口** | `Main` + 全部分派、单实例互斥、两条退出信号监听（S4 起命令行**解析**在 `CliOptions`，见下一行） |
+| `src/QwenTray.Core/Cli.cs`〔Core〕 | **命令行解析**（S4 抽出） | `CliOptions.Parse`（纯数据）；`IsDiagnostic`（全部诊断/自检模式）、`IsLockFree`（诊断或 `--bench`）—— 两个判定各被单测**穷举**，新增探针忘了登记就会红 |
 | `TrayApp.cs` | 托盘骨架（partial 1/5） | 全部字段声明、`TrayApp()` 构造函数（建菜单/图标/`clock`）、`dsh-tray.cfg` 读写（`Cfg`/`LoadCfg`/`SaveCfg`/`SaveAllPos`）、`RefreshChecks`、显存分摊提示 |
 | `TrayApp.Services.cs` | 模型服务（partial 2/5） | `PortUp`/`HealthUp`/`KillByPort`、`BuildSvcMenu`/`RefreshSvcMenu`（每模型二级菜单）、`Start`/`Stop`/`StopAll`/`RestartSvc`/`ReloadSvcConfig` |
 | `TrayApp.Dsh.cs` | DSH 与日志（partial 3/5） | `DshUp`/`DshStart`/`DshStop`/`DshRestart`、`ScrubWorkBuddyEnv`/`StripWorkBuddyShim`（崩溃链 A 修复）、`TailLog`/`ClearDshLogFiles`/`OpenDshLog`、`Bg`/`Ui`/`ReportEx`（S0 调度器入口） |
@@ -361,30 +362,49 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
 
 **回滚（S1 结构拆分）**：`Program.cs.bak-s1` / `ModelPerf.cs.bak-s1` 是这两个文件的前身（`.cs.bak-*` 后缀不被 SDK 编译）；回滚 = 删掉 20 个新文件 + 把这两个改名回去。
 
-### 12.1 两个工程（S3，2026-09-12）
+### 12.1 三个工程（S3 分工程 → S4 加测试，2026-09-12）
 
 ```
 dsh-chat-popup/
-├─ QwenTray.csproj          ← DSHTray.exe（WinForms 托盘，UseWindowsForms=true）
+├─ QwenTray.csproj           ← DSHTray.exe（WinForms 托盘，UseWindowsForms=true）
 │  └─ *.cs（21 个：TrayApp 5 个 partial / Program2 / LogForm / UiDispatcher / Service / …）
 │     └─ ProjectReference ──┐
-└─ src/QwenTray.Core/       │
-   ├─ QwenTray.Core.csproj ─┘  ← QwenTray.Core.dll（UseWindowsForms=false）
-   └─ *.cs（15 个：Config / ServiceSpec / LaunchArgs / Perf 数据层 / DshAuth / DshRpc / 硬件采集）
+├─ src/QwenTray.Core/       │
+│  ├─ QwenTray.Core.csproj ─┘  ← QwenTray.Core.dll（UseWindowsForms=false）
+│  └─ *.cs（16 个：Config / ServiceSpec / Cli / LaunchArgs / Perf 数据层 / DshAuth / DshRpc / 硬件采集）
+└─ tests/QwenTray.Tests/       ← 93 个单测（xunit 2.5.3 + coverlet，UseWindowsForms=false）
+   ├─ QwenTray.Tests.csproj
+   └─ *Tests.cs（CliOptions / LlamaLogParser / PerfFingerprint / Config / LaunchArgs）
 ```
 
 **命名空间两边都是 `QwenTray`**（只是程序集不同）⇒ 调用点零改动。
 
-**构建/发布不变**：`dotnet build -c Release` 会先编 Core 再编主工程；`dotnet publish -c Release -o publish-next` 产物里会多一个 `QwenTray.Core.dll`。`apply-dsh-tray.cmd` 用的是 `robocopy /E` **整目录**同步，**不需要改脚本**。
+**构建/发布不变**：`dotnet build -c Release` 会先编 Core 再编主工程；`dotnet publish -c Release -o publish-next` 产物里会多一个 `QwenTray.Core.dll`。`apply-dsh-tray.cmd` 用的是 `robocopy /E` **整目录**同步，**不需要改脚本**。测试工程**不在**构建/发布链上（主工程不引用它）—— 这是有意的，发布产物里不会混进 xunit。
 
-**两条必须知道的规则**：
+**四条必须知道的规则**：
 
 1. **Core 不许引用 WinForms** —— 由 `UseWindowsForms=false` 在编译期强制（引用了就 `CS0234`，不是警告、不是约定）。不要把某个文件搬进 Core 后再把开关打开去迁就它；那个文件属于 Ui 侧。
    *附带收益*：这条围栏在 S3 落地当天就清出了 S1 切分时**复制进每个文件**的 14 行僵尸 `using`（`System.Drawing` + `System.Windows.Forms`）。详见报告 §12.2。
-2. **主工程排除 Core 目录必须排整个目录**：
+2. **主工程排除两个子工程目录，必须排整个目录**：
    ```xml
-   <DefaultItemExcludes>$(DefaultItemExcludes);src/QwenTray.Core/**</DefaultItemExcludes>
+   <DefaultItemExcludes>$(DefaultItemExcludes);src/QwenTray.Core/**;tests/**</DefaultItemExcludes>
    ```
    只排 `*.cs` 会让子工程 `obj/*.cs`（`AssemblyInfo` 那批）卷进主编译，报 **CS0579「特性重复」**（报告 §9.5 / §12.3）。
+3. **不要建 `.sln`** —— 根目录必须保持「只有一个 `.csproj`」。发布流程用 `dotnet publish -c Release -o publish-next`，**无参数 `publish` 在含 `.sln` 的目录会要求显式指定工程而失败**。跑测试显式给路径。
+4. **改探针清单要同步改两处** —— `Cli.cs` 的 `IsDiagnostic` 与 `tests/…/CliOptionsTests.cs` 的 `DiagnosticFlags()`。漏改会让那条穷举断言变红（这正是它存在的意义：替代"靠人记住"）。
+
+**跑单测**（不需要托盘、不需要模型、不碰真实配置）：
+
+```powershell
+dotnet test tests/QwenTray.Tests/QwenTray.Tests.csproj -c Release
+# 带覆盖率
+dotnet test tests/QwenTray.Tests/QwenTray.Tests.csproj -c Release --collect:"XPlat Code Coverage"
+# 解析覆盖率报告（留档脚本）
+python docs/temp/gov/s4_coverage.py
+```
+
+⚠️ 测试**绝不调用 `Config.Load()`** —— 它有写盘副作用（读不到就把默认配置写回进程目录）。要测回填语义请用纯函数 `Config.MergeFrom` / `Config.Merge`。
+
+**S4 的改造验收**：`dotnet test` 93/93 全绿；编译 0 错误 / 30 警告（= S3 基线）；10 项自检与 S3 主树**同时刻**差分 ⇒ 8 项逐字节一致、2 项仅运行时刻差异；另对断言本身做了负向测试（摘掉一个探针 ⇒ 如期 1 个失败）。详见报告 §13。
 
 **S3 的改造验收（同机同配置差分法）**：改造前后各跑一遍 `--selftest-*` 全套 + `--dump-menu`，逐字节比对 ⇒ 实质内容一致；`FP-REAL-8081 = PASS (966d1620a3)`；真实 `--bench 8081` 打印 `已记入台账 cfg=966d1620a3`，台账 17 条不新增。基线留档 `~/.workbuddy/_backup/20260912_s3_baseline/`。

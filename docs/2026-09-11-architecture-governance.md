@@ -586,8 +586,8 @@ public List<string> TailSamples(int maxLines){
 | **S0** ✅ | **只修承重缺陷，不动结构**（已完成，见 §9）：①`UiDispatcher`（最小化版：捕获 `SynchronizationContext`，**同时替换 `Ui()` 与 `LogForm.AppendTo()` 两个锚点**）②`svc.log` 换有界 `ConcurrentQueue` 或统一加锁 ③两个 `RichTextBox` 加上限 ④`Bg()`/`Ui()` 异常落盘 ⑤修 `renderSessionItem` ⑥`ApplyPluginSettings` 改后台 ⑦`TailSamples` 改成真·尾部读取 | 低 | 既有 `--selftest-*` 全 PASS；**新增** `--selftest-uithread`、`--selftest-logsink`（见 §7） |
 | **S1** ✅ | **已完成（2026-09-11，见 §10）** —— 同工程内按文件拆类型（零逻辑改动）：`Program.cs`(7 类型) + `ModelPerf.cs`(17 类型) → **20 个文件**；`TrayApp` 用 `partial` 按职责分 5 块 | 极低 | 编译 0 error / 32 警告（= 基线）；9 项自检全 PASS；**多重集守恒断言**通过（缺失 0 / 多出 4 = 5 块各补的闭合 `}`） |
 | **S2** ✅ | **已完成（2026-09-12，见 §11）** —— 切出 `ServiceSpec`（10 个配置字段 + `From`）；`Service` 改为**组合**（10 个转发属性保旧访问点零改动）⇒ `LaunchArgs.Build` 与 `PerfRuntime` 四方法的签名里**不再出现 `Service`**。`ServiceRuntime` **有意未拆**（无 S3 收益，理由见 §11.3） | 中 | `dotnet build` **0 错误 / 30 警告**；9 项自检全 PASS；`--selftest-perf` 39 → **40/40**（新增 `FP-REAL-8081` 锚）；**真实 `--bench 8081` 打回 `cfg=966d1620a3`**（= 改造前基线；台账未新增条目） |
-| **S3** | 抽 `QwenTray.Core` 工程（`Config` / `ServiceSpec` / `Perf*` / `DshAuth` / `DshRpc` / `LaunchArgs` 等无 UI 依赖部分）| 中 | Core 工程**不引用** `System.Windows.Forms`（用编译期断言卡住）。🔓 **S2 已为这一步清掉最大障碍**：`LaunchArgs` 与 `PerfRuntime` 不再引用 `Service`，`ServiceSpec` 自身无 WinForms 依赖 |
-| **S4** | 抽 `Cli` + 建 `QwenTray.Tests`，先给**纯逻辑**加单测：`LlamaLogParser`、`PerfFingerprint`、`Config` 合并语义、`LaunchArgs.Build` | 低 | 覆盖率门槛（建议 Core 先卡 60%，纯解析类卡 90%） |
+| **S3** ✅ | **已完成（2026-09-12，见 §12）** —— 抽 `QwenTray.Core` 工程：15 个无 UI 依赖文件 `git mv` 进去（git 全部识别为 rename ⇒ 历史保留），命名空间**保持 `QwenTray`** ⇒ 调用点零改动 | 中 | Core 用 `UseWindowsForms=false` 卡成**编译期围栏**（里面出现 `System.Windows.Forms` 即 CS0234）。围栏落地当天就清掉了 S1 遗留的 14 行僵尸 using |
+| **S4** ✅ | **已完成（2026-09-12，见 §13）** —— 抽 `CliOptions`（Core）+ 建 `QwenTray.Tests`（93 个单测）；为此把 `Config` 的回填抽成纯函数 `MergeFrom` / `Merge` | 低 | `dotnet test` **93/93 全绿**；已纳入范围的类 ≥95%（`Cli` / `LlamaLogParser` 100%）。⚠️ Core **总体仅 27.8%** —— 「Core 先卡 60%」这步不成立，原因与建议口径见 §13.3 |
 | **S5** | 拆 `TrayApp`：`ServiceManager`（启停/探活）、`MenuBuilders`、`LogSink` | 高 | 托盘行为回归清单（见 §7）逐项手工过 |
 
 **为什么不先拆模块**：P0-1、P1-1、P1-2 是**跨模块的行为问题**，拆模块不会消除它们，反而会把"用业务控件当 marshal 锚点"这个错误模式带进新的 `Ui` 模块，成为"新架构里的旧毛病"；`svc.log` 的裸 `StringBuilder` 也会被原样搬进 `LogSink` 并**继承**它的线程不安全。
@@ -869,12 +869,12 @@ S2（`ServiceSpec`/`ServiceRuntime`，硬指标是 `cfgId` 不变）→ S3（抽
 
 配套的一条小纪律：**改前先取基线快照，改后用同一条命令复现**。本次是「记下 `966d1620a3` + 备份台账 → 改造 → 重跑 bench → 比对」。
 
-### 11.6 尚未做（S3 起）
+### 11.6 尚未做（S3 ✅ / S4 ✅ / S5 待做）
 
 | 步 | 内容 | 本次为它铺了什么 |
 |---|---|---|
-| **S3** | 抽 `QwenTray.Core`（`Config` / `ServiceSpec` / `Perf*` / `DshAuth` / `DshRpc` / `LaunchArgs`） | `LaunchArgs` 与 `PerfRuntime` **已不再引用 `Service`**；`ServiceSpec` 本身无 WinForms 依赖 ⇒ 边界已可在编译期卡住 |
-| **S4** | `Cli` + `QwenTray.Tests` | `FP-REAL-8081` 已示范"纯逻辑可被断言驱动" |
+| **S3** ✅ | 抽 `QwenTray.Core`（`Config` / `ServiceSpec` / `Perf*` / `DshAuth` / `DshRpc` / `LaunchArgs`）—— 已完成，见 §12 | `LaunchArgs` 与 `PerfRuntime` **已不再引用 `Service`**；`ServiceSpec` 本身无 WinForms 依赖 ⇒ 边界已可在编译期卡住 |
+| **S4** ✅ | `Cli` + `QwenTray.Tests` —— 已完成，见 §13 | `FP-REAL-8081` 已示范"纯逻辑可被断言驱动"；S4 把它搬成了标准单测（`dotnet test` 即可跑，不必起托盘） |
 | **S5** | 拆 `TrayApp` → `ServiceManager` / `MenuBuilders` / `LogSink` | `Service` 的转发属性就是删除清单：到了 S5，把 10 个转发属性换成对 `Spec` 的直接访问即可，编译器会**逐处报错**指路（这正是转发布局比继承好的第二个理由） |
 
 > ✅ **版本控制状态已收口（2026-09-12）**：S0/S1/S2 曾长期**全部未提交**（`git status` 里 `Program.cs` 是 `D`、新文件全是 `??`），那时 git HEAD 停留在治理开始之前 ⇒ 回滚**不能**用 `git checkout`（会连 S0 的 `LogSink` 一起丢）。现已按 3 个分层提交入库并在独立 worktree 上做过全新检出验证：
@@ -957,11 +957,90 @@ Core 的 `.csproj` 里没有写"请不要引用 WinForms"这种注释当约定�
 1. **架构边界要用编译器表达，不要用文档表达。** `UseWindowsForms=false` 这一行比一页"编码约定"都硬 —— 它在 S3 落地当天就清掉了 14 行躺了三轮的死代码。凡是"某模块不许依赖 X"这类约束，优先找**能编译失败**的写法（关闭引用、独立 TFM、`BannedApiAnalyzers`），退而求其次才是文档 + 人工 review。
 2. **断言本身要有负向测试。** 正面用例只能证明"正常情况下它不拦"，证不了"该拦的时候它真拦"。而且负向测试的**判据要落在目标错因上**（§12.2 的 `CS1529` vs `CS0234` 假阳性）。
 
-### 12.6 尚未做（S4 起）
+### 12.6 尚未做（S4 ✅ / S5 待做）
 
 | 步 | 内容 | 本次为它铺了什么 |
 |---|---|---|
-| **S4** | 抽 `Cli` + 建 `QwenTray.Tests`，给纯逻辑加单测（`LlamaLogParser` / `PerfFingerprint` / `Config` 合并语义 / `LaunchArgs.Build`） | **`QwenTray.Core` 现在就是一个可被引用、可被单测、且保证没有 UI 依赖的程序集** —— 这是加测试工程的前提条件，也是 S3 的真正目的 |
+| **S4** ✅ | 抽 `Cli` + 建 `QwenTray.Tests`，给纯逻辑加单测（`LlamaLogParser` / `PerfFingerprint` / `Config` 合并语义 / `LaunchArgs.Build`）—— **已完成，见 §13** | **`QwenTray.Core` 现在就是一个可被引用、可被单测、且保证没有 UI 依赖的程序集** —— 这是加测试工程的前提条件，也是 S3 的真正目的 |
 | **S5** | 拆 `TrayApp` → `ServiceManager` / `MenuBuilders` / `LogSink` | `Service` 的 10 个转发属性就是删除清单（见 §11.6） |
 
 > **发布状态**：S3 纯内部结构改动，**对外行为零变化**（自检差分可证）。是否随发布上线都不影响功能；要上线仍需双击桌面 `apply-dsh-tray.cmd`（它会先跑 `--selftest-exit` + `--selftest-svcmenu` 验证 `publish-next` 确实是新版）。
+
+---
+
+## 13. S4 实施记录（2026-09-12）
+
+**范围**（§6 定义）：抽 `Cli` + 建 `QwenTray.Tests`，先给纯逻辑加单测。落地为 3 处代码改动 + 1 个新工程，`+804 / −39` 行。
+
+### 13.1 抽 `CliOptions`：把「血的教训」变成可穷举断言
+
+原来 `Program2.Main` 前 70 行是 11 个 `Array.IndexOf(args,"--selftest-…")>=0` 的内联解析，解析结果决定**进程要不要走到 `Application.Run`**。这段代码的历史伤疤就写在它自己的注释里：
+
+> 曾漏写 `exitProbe` 分支（它又跳过了单实例锁），`--selftest-exit` 一路落到 `Application.Run`，起出一个「没有锁的幽灵托盘」+ 通知区图标且永不退出，只能手工 taskkill。
+
+S4 把这段解析抽成 `src/QwenTray.Core/Cli.cs` 的 `CliOptions`（纯数据、零副作用），并给两个判定起名字：
+
+| 判定 | 原来 | 现在 |
+|---|---|---|
+| 不占单实例锁 | `!dump && !selftest && !menuProbe && … && benchPort<=0`（12 项长串） | `!cli.IsLockFree` |
+| 防御栏（绝不走到 `Application.Run`） | `if(dump\|\|selftest\|\|menuProbe\|\|…\|\|uiProbe)`（10 项） | `if(cli.IsDiagnostic)` |
+
+两处都**等价**（防御栏比原清单多覆盖 `perfProbe`，而它在更早处已 `return`，故实际不可达 —— 方向是单侧收紧）。真正的收益在测试侧：现在有一条断言枚举**每一个探针标志**，要求它必须让 `IsDiagnostic` / `IsLockFree` 为真。以后新增探针忘了登记，`dotnet test` 当场红，而不是等某天在通知区里多出一个幽灵。
+
+`Program2.Main` 后续 130 行分派逻辑**一行未改** —— 改动全部落在前 73 行（同义绑定 + 两处判定），这是"行为中性"最容易审的形式。
+
+> 忠实保留一处历史怪癖并用测试钉住：`--dump-menu` **只认 `args[0]`**，其余标志认任意位置。实际调用形态恒为 `DSHTray.exe --dump-menu`，两种写法等价；要"顺手修好"属行为变更，该由独立评估驱动，不该混在抽离里。
+
+### 13.2 为可测性而做的唯一重构：`Config` 的回填抽成纯函数
+
+`Config.Load()` 把"读文件 → 解析 → 空值回填 → 失败时写盘"糊在一个方法里，于是回填语义（哪些字段补默认值、哪些**有意不补**）根本测不到。S4 抽出：
+
+- `Config.MergeFrom(string? json)` —— 纯函数；返回 `null` 表示这份 JSON 不可用（空串 / 非法 / 解析出 null / 没有 services）
+- `Config.Merge(AppConfig c)` —— 只补 4 个字符串字段；`Dsh*` 系列**有意不回填**（留空 = 菜单仅提示配置）
+
+`Load()` 行为一字未改（异常吞掉后回落 `Default()` 并写盘的路径照旧）。顺带收益：`MergeFrom` 就是"只读解析"的干净入口 —— 本项目有一条已知约束：重读配置必须只读解析，不能调会写盘的 `Load()`。
+
+### 13.3 覆盖率：如实说明「没达标」
+
+§6 给 S4 定的门槛是「Core 先卡 60%，纯解析类卡 90%」。实测：
+
+| 口径 | 数值 | 判定 |
+|---|---|---|
+| **Core 总体** | 行 **27.8%**（211/758）、分支 39.1% | ❌ **未达 60%** |
+| 已纳入范围的类 | `Cli` 100%、`LlamaLogParser` 100%、`PerfFingerprint` 96.4%、`LaunchArgs` 95.2~100%、`Config`（回填部分）100% | ✅ 达 90% |
+| 未纳入的文件（0 覆盖） | `PerfStore` 140 行、`PerfRuntime` 73、`PerfModel` ~64、`HwInfo` 45、`BenchRunner` 45、`PerfSampler` 40、`DshRpc` 36、`SysInfo` 31、`GpuInfo` 28、`DshAuth` 26 | 不在 S4 范围 |
+
+**结论**：27.8% 是**范围事实**，不是失败 —— S4 的定义只含 4 个类，Core 里其余 11 个文件一行没测。「Core 卡 60%」这个门槛在 S4 这步**不成立**，它实质是 S5/S6 的目标。**建议改口径为「按已纳入范围的类卡 90%」**，Core 总覆盖率单列为趋势指标（当前 27.8%，随 S5 抽出 `ServiceManager`/`MenuBuilders` 再抬）。
+
+> ⚠️ `Config.Load()` 的 9 行**有意为 0 覆盖**：它有写盘副作用（读不到就把默认配置写回 `Config.Path_`），在测试进程里调它会把文件丢进 `bin/`。要测 IO 行为得另有设计（例如先把路径参数化），本步不做 —— **这个 0 是决定，不是遗漏**。
+
+### 13.4 三条不查档案就会踩的规则
+
+1. **不建 `.sln`**。根目录必须保持"只有一个 `.csproj`"：发布流程用的是 `dotnet publish -c Release -o publish-next`，**无参数 `publish` 在含 `.sln` 的目录会要求显式指定工程而报错**。跑测试显式给路径：`dotnet test tests/QwenTray.Tests/QwenTray.Tests.csproj -c Release`。
+2. **主工程 `DefaultItemExcludes` 要加整个 `tests/**`**。这是 §9.5 那个 CS0579 的同一个坑 —— SDK 只排**项目根**的 `bin`/`obj`，子工程 `obj/*.cs` 里的 `Assembly*Attribute` 会被卷进主工程编译。
+3. **测试工程也设 `UseWindowsForms=false`**。被测对象 `QwenTray.Core` 本身就是无 UI 程序集，测试侧用同一条围栏 —— 让"Core 没有 UI 依赖"有两个方向的守卫。
+
+### 13.5 验收：同机同配置差分 + 负向测试
+
+| 项 | 结果 |
+|---|---|
+| 编译 | **0 错误 / 30 警告**（= S3 基线），无 CS0579 |
+| `dotnet test` | **93/93 全绿** |
+| 负向测试（测断言自身） | 临时从 `IsDiagnostic` 摘掉 `--selftest-perf` ⇒ 如期 **21 通过 / 1 失败**；还原后 sha256 一致 ⇒ 断言不是空转，且判据落在目标错因上 |
+| 10 项自检 diff | **8 项与 S3 主树逐字节一致**；2 项差异仅为运行时刻（`logwin` / `perf` 的 `ts` 字段） |
+| 关键锚 | `--selftest-perf` **40/40**，含 `FP-REAL-8081 = PASS (966d1620a3)`；单测里另有一条同源的 `Real8081Config_StillHashesTo_966d1620a3`（`dotnet test` 即可跑，不必起托盘） |
+
+**差分过程中排除的两个假警报**（不先取基线就会误判成回归）：
+
+1. worktree 是 **git 检出、没有 `publish/`** ⇒ `cp` 配置失败 ⇒ 自检用了**自动生成的默认配置模板** ⇒ `plugins` / `svcmenu` 输出与主树不同。**这是测试装置差异**，补齐真配置后逐字节一致。
+2. 输出文件在终端里显示为乱码（`涓嶅彲鐢`），一度像是编码回归；实为 **UTF-8 文件被 GBK 渲染**，两棵树的文件同为 UTF-8 无 BOM。
+
+> 方法复用：**两棵树在同一时刻各跑一遍**同一批自检再 diff —— 单边采样无法区分"代码回归"与"环境不同"，本次两次假警报都属于后者。
+
+### 13.6 尚未做（S5 起）
+
+| 步 | 内容 | 本次为它铺了什么 |
+|---|---|---|
+| **S5** | 拆 `TrayApp` → `ServiceManager` / `MenuBuilders` / `LogSink` | `Service` 的 10 个转发属性就是删除清单（见 §11.6）；测试工程已就位，拆出的纯逻辑可直接进 `QwenTray.Tests` |
+
+> **发布状态**：S4 是内部重构 + 新增测试工程，**对外行为零变化**（自检差分可证）。发布链没变，仍走桌面 `apply-dsh-tray.cmd`（`publish-next` 我不重建也不影响，S4 不改变 exe 的前置探针）。
