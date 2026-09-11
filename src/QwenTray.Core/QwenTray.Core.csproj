@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    S3（2026-09-12）：QwenTray.Core —— 无 UI 依赖的逻辑层。
+    见 docs/2026-09-11-architecture-governance.md §12。
+
+    本工程的核心作用是**当一条编译期围栏**，不是"分文件夹"：
+    UseWindowsForms=false 时，Core 内任何 `using System.Windows.Forms;`、`MessageBox.`、
+    `Control`、`Application.` 都会直接 CS0246 编译失败 —— 于是"Core 不许碰 UI"这件事
+    由编译器强制，而不是靠人记住。S3 落地时正是这条围栏**强迫**我们清掉了
+    S1 拆分遗留的 14 行僵尸 using（那些 using 在主工程里躺了整整一轮，没人发现是死的）。
+
+    ⚠️ 不要为了让某个文件编过而把 UseWindowsForms 打开。该文件属于 Ui，不属于 Core。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>false</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>QwenTray.Core</AssemblyName>
+    <Product>DSH托盘 核心逻辑</Product>
+    <!-- 命名空间**有意保持不变**（QwenTray）⇒ 调用点零改动，S3 才能做到"只换程序集边界" -->
+    <RootNamespace>QwenTray</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- SysInfo.cs 用 WMI 读内存/磁盘；主工程也直接引用同一包 -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>

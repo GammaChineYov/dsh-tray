@@ -10,10 +10,23 @@
     <AssemblyTitle>DSH托盘</AssemblyTitle>
     <RootNamespace>QwenTray</RootNamespace>
     <LangVersion>latest</LangVersion>
+    <!--
+      S3：把 Core 子工程目录整体排除出**本工程**的默认 glob（Compile/None/Content 一并）。
+      ⚠️ 必须排的是整个目录，不能只排 `src/QwenTray.Core/*.cs`：
+         SDK 默认只排除**项目根**的 bin/obj，子工程的 `src/QwenTray.Core/obj/*.cs`
+         （AssemblyInfo 那批 Assembly*Attribute）会被卷进主工程的编译，报 CS0579「特性重复」。
+         这个坑在 S0 期间踩过一次（证据工程放在 docs/ 下时），详见
+         docs/2026-09-11-architecture-governance.md §9.5。
+    -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);src/QwenTray.Core/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2210.55" />
     <PackageReference Include="System.Management" Version="8.0.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- S3：无 UI 依赖的逻辑层（编译期受 UseWindowsForms=false 约束，见 src/QwenTray.Core/*.csproj） -->
+    <ProjectReference Include="src/QwenTray.Core/QwenTray.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="whale-girl.ico" CopyToOutputDirectory="PreserveNewest" />
