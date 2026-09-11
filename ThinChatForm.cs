@@ -727,10 +727,11 @@ function renderSessionItem(s) {
   const isRunning = s.running ? 'run' : '';
   const isSub = s.origin === 'subagent' ? '<span class="subbadge">子</span>' : '';
   
-  return '<div class="sess' + (isActive ? ' active' : '') + '" data-sid="' + s.sessionId + '">';
-  return '<span class="dot ' + isRunning + '"></span>' + isSub + '<div class="t">' + title + '</div>';
-  return '<div class="m">' + time + '</div>';
-  return '</div>';
+  // S0-④（报告 P0-2）：原为四条连续 return —— 只有第一条会执行，会话列表渲染成一排空壳
+  return '<div class="sess' + (isActive ? ' active' : '') + '" data-sid="' + s.sessionId + '">'
+       + '<span class="dot ' + isRunning + '"></span>' + isSub + '<div class="t">' + title + '</div>'
+       + '<div class="m">' + time + '</div>'
+       + '</div>';
 }
 
 

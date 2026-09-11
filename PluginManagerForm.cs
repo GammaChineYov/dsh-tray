@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace QwenTray;
@@ -21,14 +22,15 @@ public class PluginManagerForm : Form {
   readonly State st;
   public State St => st;   // 外部（托盘）重扫后回写 Inv/SafeMode 再 Populate
   readonly Func<bool, HashSet<string>, HashSet<string>, string> onApply;   // (safeMode, disabledEntries, disabledDev) -> 结果说明
-  readonly Action? onRestart;
+  readonly Action onRestart;
   readonly Action<bool> onSafeModeChanged;
   readonly ListView list;
   readonly CheckBox chkSafe;
   readonly Label note;
   readonly TextBox logBox;
+  readonly Button btnApply, btnApplyRestart, btnRefresh;   // 提升为字段：Apply 需要异步恢复它们的可用状态
 
-  public PluginManagerForm(State st, Func<bool, HashSet<string>, HashSet<string>, string> onApply, Action? onRestart, Action<bool> onSafeModeChanged, Icon? icon){
+  public PluginManagerForm(State st, Func<bool, HashSet<string>, HashSet<string>, string> onApply, Action onRestart, Action<bool> onSafeModeChanged, Icon icon){
     this.st = st; this.onApply = onApply; this.onRestart = onRestart; this.onSafeModeChanged = onSafeModeChanged;
     Text = "DSH 插件管理"; if(icon != null) Icon = icon;
     Size = new Size(760, 560); StartPosition = FormStartPosition.CenterScreen; MinimizeBox = false; MaximizeBox = false;
@@ -48,13 +50,13 @@ public class PluginManagerForm : Form {
       if(e.CurrentValue == CheckState.Unchecked) return; // 勾选动作无需拦截
     };
 
-    var btnApply = new Button{ Text = "应用", Left = 12, Top = 428, Width = 110, Height = 30 };
-    var btnApplyRestart = new Button{ Text = "应用并重启 DSH", Left = 132, Top = 428, Width = 150, Height = 30 };
-    var btnRefresh = new Button{ Text = "重新扫描", Left = 292, Top = 428, Width = 100, Height = 30 };
+    btnApply = new Button{ Text = "应用", Left = 12, Top = 428, Width = 110, Height = 30 };
+    btnApplyRestart = new Button{ Text = "应用并重启 DSH", Left = 132, Top = 428, Width = 150, Height = 30 };
+    btnRefresh = new Button{ Text = "重新扫描", Left = 292, Top = 428, Width = 100, Height = 30 };
     var btnClose = new Button{ Text = "关闭", Left = 632, Top = 428, Width = 100, Height = 30 };
     btnApply.Click += (s, e) => Apply(false);
     btnApplyRestart.Click += (s, e) => Apply(true);
-    btnRefresh.Click += (s, e) => { CollectChecks(); RefreshAll?.Invoke(); };
+    btnRefresh.Click += (s, e) => { CollectChecks(); if(RefreshAll != null) RefreshAll(); };
     btnClose.Click += (s, e) => Close();
 
     note = new Label{ Left = 402, Top = 433, Width = 220, Height = 24, ForeColor = Color.Gray, Text = "启停在下次启动 DSH 后生效" };
@@ -65,7 +67,7 @@ public class PluginManagerForm : Form {
     Populate();
   }
 
-  public Action? RefreshAll;   // 由外部赋值为"重新 Scan 并 Populate"
+  public Action RefreshAll;   // 由外部赋值为"重新 Scan 并 Populate"
 
   public void Populate(){
     list.Items.Clear();
@@ -124,11 +126,32 @@ public class PluginManagerForm : Form {
     }
   }
 
+  // S0-⑥（报告 P1-4）：原来在 UI 线程同步调 onApply —— 它内部会跑 dump-config 子进程（WaitForExit 上限 60s），
+  // 期间托盘菜单点不开、日志窗口不刷新。现在把 onApply 整体丢到后台线程；其中真正碰 UI 的少数动作
+  // （菜单勾选刷新）由 TrayApp 侧自行 marshal 回 UI 线程，这里只负责按钮忙闲状态与结果回贴。
   void Apply(bool restart){
     CollectChecks();
-    string msg = onApply(st.SafeMode, st.DisabledEntries, st.DisabledDev);
-    Log(msg);
-    if(restart && onRestart != null){ Log("正在重启 DSH（杀 3080 → 带 patch 重启）…"); onRestart(); }
+    var sm = st.SafeMode;
+    var de = new HashSet<string>(st.DisabledEntries, StringComparer.OrdinalIgnoreCase);
+    var dd = new HashSet<string>(st.DisabledDev, StringComparer.OrdinalIgnoreCase);
+    SetBusy(true);
+    Log("（后台执行中：落配置 → registry 手术 → 重扫插件 → 重建 patch overlay）");
+    Task.Run(() => {
+      string msg;
+      try { msg = onApply(sm, de, dd); } catch (Exception ex) { msg = "应用失败: " + ex.Message; }
+      Action done = () => {
+        try {
+          SetBusy(false);
+          Log(msg);
+          if (restart && onRestart != null) { Log("正在重启 DSH（杀 3080 → 带 patch 重启）…"); onRestart(); }
+        } catch { }
+      };
+      try { if (IsHandleCreated) BeginInvoke(done); else done(); } catch { }
+    });
+  }
+
+  void SetBusy(bool busy){
+    try { btnApply.Enabled = !busy; btnApplyRestart.Enabled = !busy; btnRefresh.Enabled = !busy; } catch { }
   }
 
   public void Log(string s){ try{ logBox.AppendText(s + "\r\n"); }catch{} }

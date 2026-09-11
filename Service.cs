@@ -1,9 +1,9 @@
-using System.Text;
-
 namespace QwenTray {
 public class Service {
   public string Name; public int Port; public string Model; public bool UseMmproj=false; public string Mmproj=""; public int Ctx; public int Batch; public int Ubatch; public bool SpecDecode=false; public string Provider="";
-  public System.Diagnostics.Process proc; public StringBuilder log = new StringBuilder(); public long lastLen=0;
+  // 日志缓冲：S0 起由裸 StringBuilder 换成有界、线程安全的 LogSink（三写一读零同步 → P1-1；只增不减 → P1-2）
+  // 调用点语义保持不变：log.Append/AppendLine 写入、log.Length 当单调游标、log.Read(游标) 增量取
+  public System.Diagnostics.Process proc; public LogSink log = new LogSink(); public long lastLen=0;
   // —— 运行状态（2026-09-11：菜单状态圆点/启动中判定/服务端实测）——
   public volatile bool Starting=false;   // 已拉起进程、端口尚未就绪（Tick 里 /health 探活，就绪后清掉）
   public int startMs=0;                  // Environment.TickCount（仅用于算启动耗时）
