@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    S4（2026-09-12）：QwenTray.Tests —— 给 QwenTray.Core 的**纯逻辑**加单测。
+    见 docs/2026-09-11-architecture-governance.md §13。
+
+    ⚠️ 三条不查档案就会踩的规则：
+    1) **不要建 .sln**。根目录必须保持"只有一个 .csproj"，因为
+       Desktop\apply-dsh-tray.cmd / 发布流程用的是 `dotnet publish -c Release -o publish-next`
+       —— 无参数 publish 在有 .sln 的目录会要求显式指定工程而报错。
+       跑测试请显式给路径：dotnet test tests/QwenTray.Tests/QwenTray.Tests.csproj
+    2) **主工程必须把本目录整体排除**（QwenTray.csproj 的 DefaultItemExcludes 里已加 `tests/**`），
+       否则本工程 obj/ 下的 AssemblyInfo 会被卷进主工程编译 ⇒ CS0579 特性重复。
+    3) UseWindowsForms=false 是**有意**的：被测对象 QwenTray.Core 本身就是无 UI 程序集，
+       测试工程也不该碰 UI —— 这样"Core 没有 UI 依赖"在测试侧也被同一围栏看着。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>false</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <AssemblyName>QwenTray.Tests</AssemblyName>
+    <RootNamespace>QwenTray.Tests</RootNamespace>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/QwenTray.Core/QwenTray.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

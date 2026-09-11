@@ -42,35 +42,30 @@ public static class Program2 {
     Application.ThreadException+=(s,e)=>{ try{ File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"tray-ex.log"),DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+" THREADEX "+e.Exception+"\r\n"); }catch{} };
     AppDomain.CurrentDomain.UnhandledException+=(s,e)=>{ try{ File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"tray-ex.log"),DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")+" FATAL "+e.ExceptionObject+"\r\n"); }catch{} };
     // 单实例互斥：开机自启双入口/重复启动时，后到者直接退出（防双托盘）
-    bool dump = args!=null && args.Length>0 && args[0]=="--dump-menu";
-    bool selftest = args!=null && Array.IndexOf(args,"--selftest-logwin")>=0;
-    bool menuProbe = args!=null && Array.IndexOf(args,"--selftest-menushow")>=0;
-    bool pluginProbe = args!=null && Array.IndexOf(args,"--selftest-plugins")>=0;
-    bool rpcProbe = args!=null && Array.IndexOf(args,"--selftest-rpc")>=0;
-    bool lockProbe = args!=null && Array.IndexOf(args,"--selftest-lock")>=0;
-    bool exitProbe = args!=null && Array.IndexOf(args,"--selftest-exit")>=0;
-    bool svcProbe = args!=null && Array.IndexOf(args,"--selftest-svcmenu")>=0;
-    bool perfProbe = args!=null && Array.IndexOf(args,"--selftest-perf")>=0;
-    bool sinkProbe = args!=null && Array.IndexOf(args,"--selftest-logsink")>=0;
-    bool uiProbe   = args!=null && Array.IndexOf(args,"--selftest-uithread")>=0;
+    // S4（2026-09-12）：命令行解析已抽到 CliOptions（Core，纯数据 ⇒ 可单测）。
+    // 下面只做**同义绑定**（字段名 → 局部名），本方法后续 130 行分派逻辑一行未改。
+    var cli = CliOptions.Parse(args);
+    bool dump        = cli.DumpMenu;
+    bool selftest    = cli.SelftestLogWin;
+    bool menuProbe   = cli.SelftestMenuShow;
+    bool pluginProbe = cli.SelftestPlugins;
+    bool rpcProbe    = cli.SelftestRpc;
+    bool lockProbe   = cli.SelftestLock;
+    bool exitProbe   = cli.SelftestExit;
+    bool svcProbe    = cli.SelftestSvcMenu;
+    bool perfProbe   = cli.SelftestPerf;
+    bool sinkProbe   = cli.SelftestLogSink;
+    bool uiProbe     = cli.SelftestUiThread;
     // 命令行真实基准：DSHTray.exe --bench <port> [promptTok] [genTok] [runs]
-    int benchPort=0, benchP=512, benchG=64, benchR=3;
-    if(args!=null){
-      int bi=Array.IndexOf(args,"--bench");
-      if(bi>=0 && bi+1<args.Length){
-        int.TryParse(args[bi+1], out benchPort);
-        if(bi+2<args.Length) int.TryParse(args[bi+2], out benchP);
-        if(bi+3<args.Length) int.TryParse(args[bi+3], out benchG);
-        if(bi+4<args.Length) int.TryParse(args[bi+4], out benchR);
-      }
-    }
+    int benchPort=cli.BenchPort, benchP=cli.BenchPrompt, benchG=cli.BenchGen, benchR=cli.BenchRuns;
     // 退出语义（2026-09-11 反转）：默认「只退托盘、保留模型」；要连模型一起停必须显式 --stopall。
     // --nostop 保留为兼容别名（等价默认，旧脚本原样可用）；同时给 --stopall 时以 --stopall 为准。
-    bool stopAll = args!=null && Array.IndexOf(args,"--stopall")>=0;
-    bool noStop  = args!=null && Array.IndexOf(args,"--nostop")>=0;   // legacy alias: keep model (== default)
-    bool askExit = (args!=null && Array.IndexOf(args,"--exit")>=0) || noStop || stopAll;
-    // 单实例互斥：开机自启双入口/重复启动时后到者退出；诊断模式（--dump-menu/--selftest/--selftest-menushow/--selftest-plugins/--selftest-rpc/--selftest-lock）不占锁
-    if(!dump && !selftest && !menuProbe && !pluginProbe && !rpcProbe && !lockProbe && !exitProbe && !svcProbe && !perfProbe && !sinkProbe && !uiProbe && benchPort<=0){
+    bool stopAll = cli.StopAll;
+    bool noStop  = cli.NoStop;   // legacy alias: keep model (== default)
+    bool askExit = cli.AskExit;
+    // 单实例互斥：开机自启双入口/重复启动时后到者退出；**诊断模式与 --bench 不占锁**
+    // （原来的 11 个 `!flag &&` 长串折成 cli.IsLockFree 一个名字，判定完全等价，且该属性有单测）
+    if(!cli.IsLockFree){
       if(askExit){ // 优雅退出：通知正在运行的主实例自己注销图标再退出（替代 kill /F，避免通知区死图标槽）
         bool keepModel = !stopAll;                      // 默认保留模型；--stopall 才连模型一起停
         string sig=ExitSignalName(keepModel); bool heard=false;
@@ -188,7 +183,9 @@ public static class Program2 {
     // 防御栏：任何诊断/CLI 模式都不得走到 Application.Run。
     // 血的教训：曾漏写 exitProbe 分支（它又跳过了单实例锁），--selftest-exit 一路落到 Application.Run，
     // 起出一个「没有锁的幽灵托盘」+ 通知区图标且永不退出，只能手工 taskkill。
-    if(dump||selftest||menuProbe||pluginProbe||rpcProbe||lockProbe||exitProbe||svcProbe||sinkProbe||uiProbe){ Environment.ExitCode=3; return; }
+    // S4：改用 cli.IsDiagnostic（比原 10 项清单**多覆盖** perfProbe —— 它在更早处已 return，故实际不可达，
+    //     但方向是单侧收紧；「每个探针标志都必须让 IsDiagnostic 为真」现在由单测穷举看住）。
+    if(cli.IsDiagnostic){ Environment.ExitCode=3; return; }
     if(_isPrimary){ // 主实例监听优雅退出信号（默认 --exit=保留模型；--exit --stopall=连模型停；菜单两项同理）
       var evStopAll=new EventWaitHandle(false,EventResetMode.AutoReset,ExitSignalName(false));
       var evKeep   =new EventWaitHandle(false,EventResetMode.AutoReset,ExitSignalName(true));

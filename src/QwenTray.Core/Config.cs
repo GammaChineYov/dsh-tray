@@ -50,19 +50,34 @@ public static class Config {
     return c;
   }
 
+  // S4（2026-09-12）：把「解析 + 空值回填」从 Load() 里抽成**纯函数（无 IO）** ⇒ 可被单测穷举。
+  // 返回 null = 这份 JSON 不可用（空串 / 非法 JSON / 解析出来是 null / 没有 services）
+  //          ⇒ 调用方应回落 Default() 并写盘（原 Load() 的行为，一字未改）。
+  public static AppConfig? MergeFrom(string? json) {
+    if (string.IsNullOrEmpty(json)) return null;
+    AppConfig? c;
+    try { c = JsonSerializer.Deserialize<AppConfig>(json); } catch { return null; }
+    if (c == null || c.Services == null || c.Services.Count == 0) return null;
+    return Merge(c);
+  }
+
+  // 空值回填：**只补这 4 个字符串字段** —— 这是既有行为，S4 如实保留。
+  // ⚠️ Dsh* 系列（DshNodeExe/DshCliBinJs/DshWorkDir/…）**刻意不回填**：留空 = 菜单仅提示配置，
+  //    补默认值会让 "本机 DSH_HOME 非默认时填真实值" 这个有意留空失效。改动前先看 MEMORY/skill。
+  public static AppConfig Merge(AppConfig c) {
+    var d = Default();
+    if (string.IsNullOrEmpty(c.LlamaServerExe)) c.LlamaServerExe = d.LlamaServerExe;
+    if (string.IsNullOrEmpty(c.DshUrl)) c.DshUrl = d.DshUrl;
+    if (string.IsNullOrEmpty(c.SettingsYamlPath)) c.SettingsYamlPath = d.SettingsYamlPath;
+    if (string.IsNullOrEmpty(c.OfficialDeepSeekUrl)) c.OfficialDeepSeekUrl = d.OfficialDeepSeekUrl;
+    return c;
+  }
+
   public static AppConfig Load() {
     try {
       if (File.Exists(Path_)) {
-        var s = File.ReadAllText(Path_);
-        var c = JsonSerializer.Deserialize<AppConfig>(s);
-        if (c != null && c.Services != null && c.Services.Count > 0) {
-          var d = Default();
-          if (string.IsNullOrEmpty(c.LlamaServerExe)) c.LlamaServerExe = d.LlamaServerExe;
-          if (string.IsNullOrEmpty(c.DshUrl)) c.DshUrl = d.DshUrl;
-          if (string.IsNullOrEmpty(c.SettingsYamlPath)) c.SettingsYamlPath = d.SettingsYamlPath;
-          if (string.IsNullOrEmpty(c.OfficialDeepSeekUrl)) c.OfficialDeepSeekUrl = d.OfficialDeepSeekUrl;
-          return c;
-        }
+        var c = MergeFrom(File.ReadAllText(Path_));
+        if (c != null) return c;
       }
     } catch {}
     var def = Default();

@@ -15,3 +15,6 @@ webview-userdata/
 # 一次性迁移脚本与探针留档（临时产物，按工程约定放 docs/temp/ 且不入库）
 docs/temp/
 
+# S4：测试工程的运行产物（dotnet test --collect 会在 TestResults/ 下落覆盖率报告）
+TestResults/
+
