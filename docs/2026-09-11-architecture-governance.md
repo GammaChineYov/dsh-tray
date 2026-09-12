@@ -588,7 +588,7 @@ public List<string> TailSamples(int maxLines){
 | **S2** ✅ | **已完成（2026-09-12，见 §11）** —— 切出 `ServiceSpec`（10 个配置字段 + `From`）；`Service` 改为**组合**（10 个转发属性保旧访问点零改动）⇒ `LaunchArgs.Build` 与 `PerfRuntime` 四方法的签名里**不再出现 `Service`**。`ServiceRuntime` **有意未拆**（无 S3 收益，理由见 §11.3） | 中 | `dotnet build` **0 错误 / 30 警告**；9 项自检全 PASS；`--selftest-perf` 39 → **40/40**（新增 `FP-REAL-8081` 锚）；**真实 `--bench 8081` 打回 `cfg=966d1620a3`**（= 改造前基线；台账未新增条目） |
 | **S3** ✅ | **已完成（2026-09-12，见 §12）** —— 抽 `QwenTray.Core` 工程：15 个无 UI 依赖文件 `git mv` 进去（git 全部识别为 rename ⇒ 历史保留），命名空间**保持 `QwenTray`** ⇒ 调用点零改动 | 中 | Core 用 `UseWindowsForms=false` 卡成**编译期围栏**（里面出现 `System.Windows.Forms` 即 CS0234）。围栏落地当天就清掉了 S1 遗留的 14 行僵尸 using |
 | **S4** ✅ | **已完成（2026-09-12，见 §13）** —— 抽 `CliOptions`（Core）+ 建 `QwenTray.Tests`（93 个单测）；为此把 `Config` 的回填抽成纯函数 `MergeFrom` / `Merge` | 低 | `dotnet test` **93/93 全绿**；已纳入范围的类 ≥95%（`Cli` / `LlamaLogParser` 100%）。⚠️ Core **总体仅 27.8%** —— 「Core 先卡 60%」这步不成立，原因与建议口径见 §13.3 |
-| **S5** ◐ **部分完成** | **S5-1 / S5-2 已完成（2026-09-12，见 §14）** —— 三块里的两块落地：① `LogSink` 移入 `QwenTray.Core`（+9 单测）；② `ServiceManager` 的**可测面**先升格 —— `SvcStatus`（`State`/`Dot`/`Enable`）+ `SvcProbe`（`PortUp`/`HealthUp`/`KillByPort`）进 Core（+25 穷举单测）。⚠️ **`MenuBuilders` 未做**，且 `ServiceManager` 的**进程编排面**（`Start`/`Stop`/`Restart`/`ReloadSvcConfig`）仍留在 `TrayApp.Services.cs` | 高 | **已做部分**：`dotnet test` **127/127**；11 项自检与同机基线差分（8 项逐字节一致，3 项差异逐条定性全为时刻/环境类）；负向测试如期 3 红后逐字节还原。**未做部分仍须** §7 回归清单逐项手工过 |
+| **S5** ✅ **收口** | **四段全部交完（2026-09-12，见 §14 / §15）**：① `LogSink` 移入 `QwenTray.Core`（+9 单测）；② `ServiceManager` 的**可测面**升格 —— `SvcStatus`（`State`/`Dot`/`Enable`）+ `SvcProbe`（`PortUp`/`HealthUp`/`KillByPort`）进 Core（+25 穷举单测）；③ 菜单**可判定文本**（`SvcLines`：4 个档位标签 / `Mid` / `Dur` / `CfgLines` / `StatusTip`）进 Core（+47）；④ 「重读配置」的**判定内核**（`SvcConfigDiff`：`Find` / `Apply`）进 Core（+13）。⚠️ **原定的「独立类型版」（`MenuBuilders` / 进程编排面）经复核判定不做**（解锁 0 自动验证、风险最高），理由见 §15.2 | 高 | `dotnet test` **193/193**；11 项自检与同机基线差分（8 项逐字节一致，3 项差异逐条定性全为时刻/环境类）；负向测试如期 3 红后逐字节还原。**原定独立类型版仍须** §7 回归清单逐项手工过 |
 
 **为什么不先拆模块**：P0-1、P1-1、P1-2 是**跨模块的行为问题**，拆模块不会消除它们，反而会把"用业务控件当 marshal 锚点"这个错误模式带进新的 `Ui` 模块，成为"新架构里的旧毛病"；`svc.log` 的裸 `StringBuilder` 也会被原样搬进 `LogSink` 并**继承**它的线程不安全。
 
@@ -622,13 +622,13 @@ public List<string> TailSamples(int maxLines){
 
 | # | 开发者视角 | 用户视角 |
 |---|---|---|
-| 1 | `dotnet test` **127/127**（S4 的 93 + `LogSink` 9 + `SvcStatus` 25） | —（纯逻辑，无 UI 面） |
+| 1 | `dotnet test` **193/193**（S4 的 93 + `LogSink` 9 + `SvcStatus` 25 + `SvcLines` 47 + `SvcConfigDiff` 13） | —（纯逻辑，无 UI 面） |
 | 2 | 11 项自检 + `--dump-menu` 与**同机基线**逐字节差分：8 项一致；3 项差异逐条定性（`menu-dump` 相对时间跨 24h 阈值 / `logwin` 时间戳 + env 枚举顺序，排序后集合 50=50 / `perf` 仅 `ts`） | 菜单结构与渲染内容与改造前一致 |
 | 3 | **负向测试**：把 `SvcStatus.State` 的 starting/running 优先级写反 ⇒ 如期 3 红（恰为优先级用例）；还原后 sha256 与改造前一致 ⇒ 断言不空转 | — |
 | 4 | 编译 **0 错误 / 30 警告**（= S4 基线，无新增） | — |
-| ⏳ | —— | **下表**是这个阶段**剩余部分（`MenuBuilders`）的验收门槛**，必须真人逐项过 |
+| ⏳ | —— | **下表**是**原定「独立类型版」（`MenuBuilders` / 进程编排面）若日后要做**的验收门槛 —— 该版经复核**判定不做**（§15.2），清单保留备查 |
 
-**托盘行为回归清单（S5 剩余部分的门槛 —— 自动化只能盖结构，交互态与真实启停必须人眼）**
+**托盘行为回归清单（原定「独立类型版」的门槛 —— 自动化只能盖结构，交互态与真实启停必须人眼）**
 
 | # | 用户视角动作 | 通过判据 |
 |---|---|---|
@@ -894,7 +894,7 @@ S2（`ServiceSpec`/`ServiceRuntime`，硬指标是 `cfgId` 不变）→ S3（抽
 
 配套的一条小纪律：**改前先取基线快照，改后用同一条命令复现**。本次是「记下 `966d1620a3` + 备份台账 → 改造 → 重跑 bench → 比对」。
 
-### 11.6 尚未做（S3 ✅ / S4 ✅ / S5 ◐ 部分完成）
+### 11.6 尚未做（S3 ✅ / S4 ✅ / S5 ✅ —— S5 落地见 §14 / §15）
 
 | 步 | 内容 | 本次为它铺了什么 |
 |---|---|---|
@@ -982,7 +982,7 @@ Core 的 `.csproj` 里没有写"请不要引用 WinForms"这种注释当约定�
 1. **架构边界要用编译器表达，不要用文档表达。** `UseWindowsForms=false` 这一行比一页"编码约定"都硬 —— 它在 S3 落地当天就清掉了 14 行躺了三轮的死代码。凡是"某模块不许依赖 X"这类约束，优先找**能编译失败**的写法（关闭引用、独立 TFM、`BannedApiAnalyzers`），退而求其次才是文档 + 人工 review。
 2. **断言本身要有负向测试。** 正面用例只能证明"正常情况下它不拦"，证不了"该拦的时候它真拦"。而且负向测试的**判据要落在目标错因上**（§12.2 的 `CS1529` vs `CS0234` 假阳性）。
 
-### 12.6 尚未做（S4 ✅ / S5 ◐ 部分完成）
+### 12.6 尚未做（S4 ✅ / S5 ✅ —— S5 落地见 §14 / §15）
 
 | 步 | 内容 | 本次为它铺了什么 |
 |---|---|---|
@@ -1035,7 +1035,7 @@ S4 把这段解析抽成 `src/QwenTray.Core/Cli.cs` 的 `CliOptions`（纯数据
 | 已纳入范围的类 | `Cli` 100%、`LlamaLogParser` 100%、`PerfFingerprint` 96.4%、`LaunchArgs` 95.2~100%、`Config`（回填部分）100% | ✅ 达 90% |
 | 未纳入的文件（0 覆盖） | `PerfStore` 140 行、`PerfRuntime` 73、`PerfModel` ~64、`HwInfo` 45、`BenchRunner` 45、`PerfSampler` 40、`DshRpc` 36、`SysInfo` 31、`GpuInfo` 28、`DshAuth` 26 | 不在 S4 范围 |
 
-**结论**：27.8% 是**范围事实**，不是失败 —— S4 的定义只含 4 个类，Core 里其余 11 个文件一行没测。「Core 卡 60%」这个门槛在 S4 这步**不成立**，它实质是 S5/S6 的目标。**建议改口径为「按已纳入范围的类卡 90%」**，Core 总覆盖率单列为趋势指标（当前 27.8%，随 S5 抽出 `ServiceManager`/`MenuBuilders` 再抬）。
+**结论**：27.8% 是**范围事实**，不是失败 —— S4 的定义只含 4 个类，Core 里其余 11 个文件一行没测。「Core 卡 60%」这个门槛在 S4 这步**不成立**，它实质是 S5/S6 的目标。**建议改口径为「按已纳入范围的类卡 90%」**，Core 总覆盖率单列为趋势指标。⚠️ **S5 收口后复核（§15）**：`MenuBuilders` **未**按原定抽成独立类型，但 `SvcLines` / `SvcConfigDiff` 两个新文件进了 Core ⇒ **本节的 27.8% 是 S4 时点值，不可当「当前值」引用**；要引用请跑当次 `dotnet test --collect:"XPlat Code Coverage"` 取最新。
 
 > ⚠️ `Config.Load()` 的 9 行**有意为 0 覆盖**：它有写盘副作用（读不到就把默认配置写回 `Config.Path_`），在测试进程里调它会把文件丢进 `bin/`。要测 IO 行为得另有设计（例如先把路径参数化），本步不做 —— **这个 0 是决定，不是遗漏**。
 
@@ -1062,19 +1062,22 @@ S4 把这段解析抽成 `src/QwenTray.Core/Cli.cs` 的 `CliOptions`（纯数据
 
 > 方法复用：**两棵树在同一时刻各跑一遍**同一批自检再 diff —— 单边采样无法区分"代码回归"与"环境不同"，本次两次假警报都属于后者。
 
-### 13.6 尚未做（S5 ◐ 部分完成 —— 见 §14）
+### 13.6 尚未做（S5 —— 见 §14 / §15）
 
-| 步 | 内容 | 本次为它铺了什么 |
+| 步 | 内容 | 后续进展 |
 |---|---|---|
-| **S5** ◐ | 拆 `TrayApp` → `ServiceManager` / `MenuBuilders` / `LogSink` | **S5-1/S5-2 已完成**（`0b23103`/`d85d342`）：`LogSink` 与 `ServiceManager` 的可测面（`SvcStatus`/`SvcProbe`）已进 Core，`dotnet test` 127/127。**S5-3/S5-4 未做**，原因与门槛见 §14.5 |
+| **S5** ✅ | 拆 `TrayApp` → `ServiceManager` / `MenuBuilders` / `LogSink` | **四段全部交完**：`LogSink` + `ServiceManager` 可测面（`SvcStatus`/`SvcProbe`）进 Core（`0b23103`/`d85d342`，见 §14）；菜单**可判定文本**（`SvcLines`）+ 重读配置**判定**（`SvcConfigDiff`）进 Core（`08f370d`，见 §15）⇒ `dotnet test` **193/193**。⚠️ **原定的「独立类型版」（`MenuBuilders` / 进程编排面）经复核判定不做**，理由见 §15.2 |
 
 > **发布状态**：S4 是内部重构 + 新增测试工程，**对外行为零变化**（自检差分可证）。发布链没变，仍走桌面 `apply-dsh-tray.cmd`（`publish-next` 我不重建也不影响，S4 不改变 exe 的前置探针）。
 
 ---
 
-## 14. S5 实施记录（2026-09-12，**部分完成**）
+## 14. S5 实施记录 —— S5-1 / S5-2（2026-09-12）
 
-**一句话**：S5 定义的三块里**两块落地、一块未做** —— 而落地的两块恰好是"能自动验证"的那半。
+**一句话**：本节记录 S5 的**前两段**（`LogSink` / `SvcStatus`+`SvcProbe` 进 Core），也就是"能自动验证"的那半。
+
+> ⚠️ **编号说明（重要）**：本节（含 §14.5）出现的「S5-3 / S5-4」指**原定的「独立类型版」**（把 `MenuBuilders` / 进程编排面搬成独立类型）。
+> 实际交付的 S5-3/S5-4 已按 **§15 重新定义**为「把菜单里**可判定的部分**搬进 Core」—— **编号相同、内容不同，勿混**。
 
 ### 14.0 为什么拆两段做，而不是一次做完
 
@@ -1086,8 +1089,9 @@ S5 是路线里唯一标「高」风险的阶段，而它的**验收**（§7 回
 |---|---|---|---|
 | **S5-1** | `LogSink` → `QwenTray.Core` | 单测 + 自检差分 | ✅ `0b23103` |
 | **S5-2** | `SvcStatus` / `SvcProbe` → Core（= `ServiceManager` 的**可测面**） | 单测 + 自检差分 | ✅ `d85d342` |
-| **S5-3** | `MenuBuilders`：菜单构建与刷新搬出 `TrayApp` | **只能真人过回归清单** | ⏳ 未做 |
-| **S5-4** | `ServiceManager` 的**进程编排面**（`Start`/`Stop`/`Restart`/`ReloadSvcConfig`） | 需**真实 llama 进程** | ⏳ 未做 |
+| **原定 S5-3** | `MenuBuilders`：菜单构建与刷新搬出 `TrayApp`（= 独立**类型**版） | **只能真人过回归清单** | ❌ 复核后**判定不做** → §15.2 |
+| **原定 S5-4** | `ServiceManager` 的**进程编排面**（`Start`/`Stop`/`Restart`/`ReloadSvcConfig`）搬出 | 需**真实 llama 进程** | ❌ 复核后**判定不做** → §15.2 |
+| **S5-3 / S5-4**（实际交付） | 菜单**可判定文本**（`SvcLines`）+ 重读配置**判定**（`SvcConfigDiff`）→ Core | 单测 + 自检差分 | ✅ `08f370d` → §15 |
 
 ### 14.1 S5-1：`LogSink` 进 Core
 
@@ -1112,12 +1116,15 @@ S5 是路线里唯一标「高」风险的阶段，而它的**验收**（§7 回
 `Service.Spec` 的 10 个转发属性**未删**：它们服务于 `ServiceManager` 的进程编排面（S5-4），
 现在删只会把改动摊进还没做的那半。
 
+> **后续（§15）**：S5-4 的独立类型版**判定不做** ⇒ 这 10 个转发属性**暂无删除必要**；
+> 真要删必须与独立类型版同批做（编译器会逐处报错 = 那份删除清单）。
+
 ### 14.3 验收（同机同配置差分；基线留档 `docs/temp/gov/s5-baseline/`）
 
 | 检查 | 结果 |
 |---|---|
 | `dotnet build -c Release` | **0 错误 / 30 警告**（= S4 基线，无新增） |
-| `dotnet test` | **127/127**（93 + `LogSink` 9 + `SvcStatus` 25） |
+| `dotnet test` | **127/127**（93 + `LogSink` 9 + `SvcStatus` 25）—— ⚠️ 这是**本节时点**的数字；S5-3/S5-4 交付后总数为 **193/193**（§15.3） |
 | 11 项自检 + `--dump-menu` 逐字节差分 | **8 项 IDENTICAL**；3 项差异见下表 |
 | 负向测试（把 `State` 的优先级改坏） | 如期 **3 红**，恰为优先级用例；还原后 sha256 = `672f2293…` ⇒ 断言不空转 |
 
@@ -1138,12 +1145,12 @@ S5 是路线里唯一标「高」风险的阶段，而它的**验收**（§7 回
    产出一份"看着像回归"的假差异。必须在 worktree 里 `dotnet publish` 之后**把真配置只读拷进去**
    （`dsh-tray-config.json` 是手工维护、不进 git 的唯一源 —— **任何 `rm` 都不许带上它**）。
 
-### 14.5 尚未做（S5-3 / S5-4）
+### 14.5 原定 S5-3 / S5-4（独立类型版）：经复核判定不做
 
 | 步 | 内容 | 为什么放着 |
 |---|---|---|
-| **S5-3** `MenuBuilders` | `TrayApp.cs` 约 150 行菜单构建 + `BuildSvcMenu`/`RefreshSvcMenu`/`SvcCfgLines`/`StatusTip`/`KeepOpen*` 搬成独立类型 | **风险最高、下游收益最低**：它解锁不了任何自动验证（Core 装不下 WinForms），验收只能靠真人回归。⚠️ 菜单控件是 `TrayApp` 的实例字段，被 `TrayApp.Dsh.cs` 的 `RefreshDshUi()` 读写 ⇒ 搬字段**必然碰那个文件**，而它当时正被另一会话修改 |
-| **S5-4** `ServiceManager` 编排面 | `Start`/`Stop`/`RestartSvc`/`RestartAll`/`StopAll`/`ReloadSvcConfig` 搬出 | 正确性**只能靠真实拉起 llama-server 验证**（`--selftest-*` 覆盖不到）⇒ 与 S5-3 同批做更划算 |
+| **原定 S5-3** `MenuBuilders` | `TrayApp.cs` 约 150 行菜单构建 + `BuildSvcMenu`/`RefreshSvcMenu`/`SvcCfgLines`/`StatusTip`/`KeepOpen*` 搬成独立类型 | **风险最高、下游收益最低**：它解锁不了任何自动验证（Core 装不下 WinForms），验收只能靠真人回归。⚠️ 菜单控件是 `TrayApp` 的实例字段，被 `TrayApp.Dsh.cs` 的 `RefreshDshUi()` 读写 ⇒ 搬字段**必然碰那个文件**，而它当时正被另一会话修改 |
+| **原定 S5-4** `ServiceManager` 编排面 | `Start`/`Stop`/`RestartSvc`/`RestartAll`/`StopAll`/`ReloadSvcConfig` 搬出 | 正确性**只能靠真实拉起 llama-server 验证**（`--selftest-*` 覆盖不到）⇒ 与 S5-3 同批做更划算 |
 
 > **判断准则（沿用 §11.3）**：拆分的收益要看它**解锁了什么下游动作**。
 > S5-1/S5-2 解锁的是"可自动验证"（进 `dotnet test` 链）；S5-3 不解锁任何自动验证，
