@@ -1201,6 +1201,8 @@ S5 原定三块是 `ServiceManager` / `MenuBuilders` / `LogSink`。前两块要�
 > 这一轮把 S5-3/S5-4 **改名落地**了：从"把菜单搬成类型"变成"把菜单里的**可判定部分**搬进 Core"。
 > 拿到的东西更少（不缩 `TrayApp.cs`），但拿到的是**真的**（进 `dotnet test` 链）。
 
+> ⚠️ **更正（2026-09-12 16:1x，复核代码后）**：上表 `ServiceManager` 那行的「**零**」**说得过重**。Core 的围栏是 `UseWindowsForms=false`，**只禁 WinForms**；`System.Diagnostics.Process` 在 Core 里**早就合法** —— `SvcProbe` 就在 `src/QwenTray.Core/SvcStatus.cs` 里直接 `Process.Start("netstat")` / `Process.GetProcessById` / `Kill`。所以进程编排面**不是"无法自动验证"，而是需要先分化**：**可测部分**（进 Core）= 启动前置判定（`Running` / `PortUp` / 端口占用提示）、重启里「等端口释放」的重试序列、日志行合成（已由 `SvcLines` 承担）、差异判定（已由 `SvcConfigDiff` 承担）—— 只要把「**发起进程**」与「**决定要不要发起**」分开，全部可用**注入式启动器 + 假时钟**做单测；**不可测部分**（留主工程 / 真人）= 真正的 `Process.Start` 与 llama 实际加载成败。⇒ 该行结论从「不做」修正为「**值得做，但要做成"编排决策进 Core + 启动器注入"**」，且仍需一次真人回归窗口兜底。`MenuBuilders` 那行的「零」**不变** —— 纯 WinForms 装配确实进不了 Core（`CS0234`）。
+
 ### 15.3 验收（同机同配置差分；基线 `docs/temp/gov/s5-baseline/`，本轮 `s5-3-after/` + 复跑 `s5-3-after2/`）
 
 | 检查 | 结果 |
