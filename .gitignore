@@ -18,3 +18,6 @@ docs/temp/
 # S4：测试工程的运行产物（dotnet test --collect 会在 TestResults/ 下落覆盖率报告）
 TestResults/
 
+# 记忆 / 待办 / 项目数据（本地工作数据，不进公开仓库）
+/.workbuddy/
+
