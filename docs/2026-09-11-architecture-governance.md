@@ -1151,3 +1151,92 @@ S5 是路线里唯一标「高」风险的阶段，而它的**验收**（§7 回
 
 > **发布状态**：S5-1/S5-2 是内部重构，**对外行为零变化**（自检差分可证）。发布链未变；
 > `publish-next` 重建与否不影响功能。
+
+---
+
+## 15. S5-3 / S5-4 实施记录（2026-09-12 下午，S5 收口）
+
+**一句话**：S5 里**能自动验证的部分到此全部交完**；剩下的"把菜单/编排面搬成独立**类型**"经复核
+判定**不做** —— 这不是"没做完"，而是按 §11.3 的判据做完之后，剩下的那块**不该做**（§15.2 有实测代价）。
+
+### 15.1 这一轮做了什么
+
+沿用 S5-1/S5-2 的同一刀法：**可判定的纯逻辑进 Core，WinForms 装配留在原位**。
+
+| 段 | 内容 | 位置 | 验证 |
+|---|---|---|---|
+| **S5-3** | 菜单**文本合成**：4 个档位标签（KV / 缓存内存 / MTP / 参数组）、文件名与宽度截断 `Mid`、时长 `Dur`、「运行时配置」6 行 `CfgLines`、状态悬浮 `StatusTip` | `src/QwenTray.Core/SvcLines.cs` | `SvcLinesTests` 47 例 |
+| **S5-4** | 「重读配置」的**判定内核**：`Find`（Name 忽略大小写 → 退同 Port）+ `Apply`（就地写穿 + 差异描述） | `src/QwenTray.Core/SvcConfigDiff.cs` | `SvcConfigDiffTests` 13 例 |
+
+调用侧（`TrayApp.Services.cs`）新增 `ToView(Service)`，把 `Service` + 当前托盘参数拍成 Core 的 `SvcView`
+—— **这是 `Service` 与 Core 之间唯一的收口点**（Core 不能引用带 `Process` 句柄的 `Service`）。
+`ReloadSvcConfig` 原先内联的三段（挑项 / 逐字段差异 / 拼接日志）收敛成两行调用。
+`TrayApp.cs` 的 4 个档位标签留了**迁移期兼容层**转发（`TrayApp.KvLabel` → `SvcLines.KvLabel`），
+与 `Service` 上那 10 个转发属性同一惯例：调用点零改动、JIT 内联。
+
+> **顺手清掉一个哑参数**：`SvcCfgLines(Service svc, bool running, LaunchResult b)` 的 `b`
+> **函数体从未读过**（首行自己算 `EffectiveGpus`，不碰 `b.args`）。**搬运是发现死参数的最好时机** ——
+> 它躲过了 S1/S2/S3/S4 四轮体检，因为只有"把它搬到另一个工程"才会强迫你写清它的真实依赖。
+
+### 15.2 为什么"独立类型"那块不做
+
+S5 原定三块是 `ServiceManager` / `MenuBuilders` / `LogSink`。前两块要的是**独立类型**，实测代价：
+
+| 待搬 | 需要动的东西 | 落点 | 解锁的自动验证 |
+|---|---|---|---|
+| `MenuBuilders` | `TrayApp` 的 ~50 个 `ToolStripMenuItem` 字段 + 构造函数里 ~145 行菜单构建 + `RefreshChecks`/`VramSplitUpdate`/`KeepOpen*`/`SetParam` 等 ~15 个方法，牵动 5 个 partial 文件约 50 处调用点（含 `TrayApp.Dsh.cs::RefreshDshUi`） | 只能留**主工程**（Core 装不下 WinForms，`CS0234`） | **零** |
+| `ServiceManager` 进程编排面 | `Start`/`Stop`/`StopAll`/`RestartSvc`/`RestartAll`/`ReloadSvcConfig`；依赖 `Bg`/`Ui`/`Log`（`TrayApp.Dsh.cs` 里 **private**）与 `logForm` ⇒ 要么放宽可见性（**碰并发文件**），要么把 ~10 项能力做成委托参数传进去 | 主工程 | **零**（`--selftest-*` 覆盖不到，只能真实拉起 llama-server） |
+
+按 §11.3 的判据（**拆分要看它解锁了什么下游动作**）：两块都只解锁"文件更短"。
+而代价是动这个应用**最核心的对象**（菜单构建历史上出过"幽灵菜单/布局错乱"，正是 §2 记录的那类缺陷），
+且必须由**真人过 §7 的回归清单**兜底。**收益 0、风险最高、还要占用一次人工回归窗口 ⇒ 不做。**
+
+> 这一轮把 S5-3/S5-4 **改名落地**了：从"把菜单搬成类型"变成"把菜单里的**可判定部分**搬进 Core"。
+> 拿到的东西更少（不缩 `TrayApp.cs`），但拿到的是**真的**（进 `dotnet test` 链）。
+
+### 15.3 验收（同机同配置差分；基线 `docs/temp/gov/s5-baseline/`，本轮 `s5-3-after/` + 复跑 `s5-3-after2/`）
+
+| 检查 | 结果 |
+|---|---|
+| `dotnet build -c Release -t:Rebuild` | **0 错误 / 30 警告**（= S4 基线，无新增） |
+| `dotnet test` | **193/193**（133 + `SvcLines` 47 + `SvcConfigDiff` 13） |
+| 11 项自检 + `--dump-menu` 与基线逐字节差分 | **8 项 IDENTICAL**；3 项差异见下表 |
+| 复跑可复现性（重建产物再采一遍） | 与上一轮 **9/11 逐字节一致**（差的两项 = 时间戳） |
+| 负向测试 | ① 摘掉 `Apply` 的 `Batch>0` 守卫 ⇒ `Apply_ZeroBatchUbatch_IsNotApplied` 如期红；② `Mid` 宽度算错 1 ⇒ 两条宽度契约如期红。合计 **3 红 / 190 通过**，还原后与 HEAD 内容一致 |
+
+**三处差异的定性（逐条）**：
+
+| 项 | 差异 | 定性 |
+|---|---|---|
+| `menu-dump.txt` | 仅"相对时间"（`18小时前`→`19小时前` / `23小时前`→`1天前`） | **时刻类**。归一化后**逐字节一致** ⇒ **菜单可见文本零变化**（本轮最想证明的一条） |
+| `selftest-logwin.txt` | 时间戳；env 清洗清单**多 1 个 token** | **时刻类 + 环境类**：多出的是 `CODEBUDDY_CURRENT_MODEL_ID`（WorkBuddy 本会话注入的环境变量）；剔掉时间戳后其余逐字节一致 |
+| `selftest-perf.txt` | 仅 `ts` | **时刻类**：`cfg 62d566325a` 与 `med/min/max/n/tok` 全等 |
+
+### 15.4 顺带发现的既有缺陷（**未修**，已用断言钉住）
+
+多卡时「运行时配置」第 2 行渲染成 **`GPU0+1`**，而一级菜单 GPU 项走 `GpuSelection.ShortLabel()`
+渲染成 **`GPU0+GPU1`** —— 同一个事实两种写法。
+
+- 成因：`SvcLines.CfgLines` 里 `eff` 是 `List<int>`，`string.Join("+", eff)` 直接得到 `"0+1"`。
+  **搬运前就是这个行为，非本轮引入**。
+- 为什么不当场修：这是**用户可见文本**的变更。S5 全程的规矩是"纯搬运不改可见输出"，
+  改了就不再能用"菜单可见文本零变化"这条证据说话。要修必须单独决定 + 单独走一次托盘人工回归。
+- 已加 `SvcLinesTests.CfgLines_MultiGpu_LayerVsTensor` 钉住现状（注释写明"要改就两边一起改"），
+  避免它某天被"顺手修好"而无人复核。
+
+### 15.5 两条与本轮验收装置有关的观察（都与 §14.4 同族）
+
+1. **`sha256 -c` 对刚 `git checkout` 回来的文件会假红**：本仓库 `core.autocrlf=true`，
+   `Write` 工具写出的文件是 LF、`git checkout` 还原出的是 CRLF ⇒ 逐字节不同但 `git status` 为空。
+   校验"是否真还原"应看 `git status` / `git diff`，或**按行尾归一后再比**
+   （`sed 's/\r$//' f | sha256sum` vs `git show HEAD:f | sha256sum`）。
+2. **`publish-next\` 里会出现一份自动生成的默认配置模板** `dsh-tray-config.json`（内容是
+   `<35B-model>.gguf` 那套占位符）。来源是 `apply-dsh-tray.cmd` 的健康哨（`--selftest-exit` /
+   `--selftest-svcmenu`）在那个目录跑过托盘，`Config.Load()` 找不到配置就写一份默认的。
+   **绝不能进 `publish\`**（发布脚本用 `robocopy /XF` 排除，线上安全）；`rm -rf publish-next` 重建是根除办法。
+   实测：`publish-next` 那份（14:18、1461 B）与 `publish` 真配置（13:04、1743 B、md5 `3337cb80…`）确实不同 ——
+   **判据也比对 `publish\*.dll` 的 mtime + 大小，别用目录 mtime**（WebView2 userdata 写入会改它）。
+
+> **发布状态**：S5-3/S5-4 与 S5-1/S5-2 同类 —— **对外行为零变化**（自检差分可证，菜单文本逐字节可查）。
+> `publish-next` 已按本轮内容重建（`DSHTray.dll` 284,160 → **280,576**、`QwenTray.Core.dll` 70,144 → **75,264**，
+> 体积变化 = 代码**搬走**而非复制两份）。发不发不影响功能，等有需要时由真人触发 `apply-dsh-tray.cmd`。

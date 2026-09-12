@@ -344,8 +344,10 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
 | `Program2.cs` | **入口** | `Main` + 全部分派、单实例互斥、两条退出信号监听（S4 起命令行**解析**在 `CliOptions`，见下一行） |
 | `src/QwenTray.Core/Cli.cs`〔Core〕 | **命令行解析**（S4 抽出） | `CliOptions.Parse`（纯数据）；`IsDiagnostic`（全部诊断/自检模式）、`IsLockFree`（诊断或 `--bench`）—— 两个判定各被单测**穷举**，新增探针忘了登记就会红 |
 | `src/QwenTray.Core/SvcStatus.cs`〔Core〕 | **服务状态映射 + 探活**（S5 抽出） | `SvcStatus.State/Dot/Enable`（四态文本 / 圆点色名 / 三个启停项可用性，**8 种组合穷举钉住**）；`SvcProbe.PortUp/HealthUp/KillByPort`（端口探活与按端口回收 llama）。⚠️ `PortUp` 与 `HealthUp` **语义不同**（前者"端口上有东西"，后者"响应体含 ok"），别合并 |
-| `TrayApp.cs` | 托盘骨架（partial 1/5） | 全部字段声明、`TrayApp()` 构造函数（建菜单/图标/`clock`）、`dsh-tray.cfg` 读写（`Cfg`/`LoadCfg`/`SaveCfg`/`SaveAllPos`）、`RefreshChecks`、显存分摊提示 |
-| `TrayApp.Services.cs` | 模型服务（partial 2/5） | `BuildSvcMenu`/`RefreshSvcMenu`（每模型二级菜单）、`Start`/`Stop`/`StopAll`/`RestartSvc`/`ReloadSvcConfig`（**进程编排面，S5-4 才搬**）。探活/状态映射已移出，见上一行 |
+| `src/QwenTray.Core/SvcLines.cs`〔Core〕 | **菜单文本合成**（S5-3 抽出） | 4 个档位标签（`KvLabel`/`CacheRamLabel`/`MtpLabel`/`ParamLabel`，越界回落到最保真档）、`Mid`（宽度截断，**必须恰好 `max` 字符**）、`Dur`、`CfgLines`（「运行时配置」**恒 6 行** —— 菜单按这个数建行池）、`StatusTip`。输入是 `SvcView`，由 `TrayApp.ToView(Service)` 拍快照（**`Service` 与 Core 之间唯一的收口点**）。⚠️ 已知可见缺陷：多卡行渲染成 `GPU0+1`（`Join("+")` on `List<int>`），与 `GpuSelection.ShortLabel()` 的 `GPU0+GPU1` 不一致 —— **未修**，断言钉住现状 |
+| `src/QwenTray.Core/SvcConfigDiff.cs`〔Core〕 | **重读配置的判定内核**（S5-4 抽出） | `Find`（Name 忽略大小写 → 退同 Port）+ `Apply`（就地写穿 `ServiceSpec` + 返回人可读差异列表）。**三条守卫**：`Batch`/`Ubatch` 只在 `>0` 时覆盖、`Provider` 只在非空时覆盖、`Mmproj` 是双条件 —— 它们决定"用户手改配置能否生效 / 会不会把内存里的值抹掉" |
+| `TrayApp.cs` | 托盘骨架（partial 1/5） | 全部字段声明、`TrayApp()` 构造函数（建菜单/图标/`clock`）、`dsh-tray.cfg` 读写（`Cfg`/`LoadCfg`/`SaveCfg`/`SaveAllPos`）、`RefreshChecks`、显存分摊提示。4 个档位标签留**迁移期兼容层**转发到 `SvcLines`（与 `Service` 那 10 个转发属性同一惯例） |
+| `TrayApp.Services.cs` | 模型服务（partial 2/5） | `BuildSvcMenu`/`RefreshSvcMenu`（每模型二级菜单的 **WinForms 装配**）、`ToView(Service)`（拍 `SvcView`）、`Start`/`Stop`/`StopAll`/`RestartSvc`/`ReloadSvcConfig`（进程编排面）。探活/状态映射/文本合成/配置差异判定**均已移出**，见上三行 |
 | `TrayApp.Dsh.cs` | DSH 与日志（partial 3/5） | `DshUp`/`DshStart`/`DshStop`/`DshRestart`、`ScrubWorkBuddyEnv`/`StripWorkBuddyShim`（崩溃链 A 修复）、`TailLog`/`ClearDshLogFiles`/`OpenDshLog`、`Bg`/`Ui`/`ReportEx`（S0 调度器入口） |
 | `TrayApp.Sessions.cs` | 会话与弹窗（partial 4/5） | `UiThreadProbe`（S0 自检）、dsh 配置 YAML 读写（`ExtractBlock`/`ReplaceBlock`/`EnsureLlamaProvider`）、`OpenPop`/`OpenThin`/`OpenOfficial`、插件管理入口、最近会话（`ReadRecent`/`RebuildRecentMenu`/`DotFor`） |
 | `TrayApp.Lifecycle.cs` | 生命周期与自检（partial 5/5） | `Adopt`（接管外部 llama）、`Tick`（1s 节拍）、`ExitApp`/`ExitFromSignal`/`RestartTray`、全部 `*Probe()` 自检入口 |
@@ -373,10 +375,10 @@ dsh-chat-popup/
 │     └─ ProjectReference ──┐
 ├─ src/QwenTray.Core/       │
 │  ├─ QwenTray.Core.csproj ─┘  ← QwenTray.Core.dll（UseWindowsForms=false）
-│  └─ *.cs（18 个：Config / ServiceSpec / Cli / LaunchArgs / LogSink / SvcStatus / Perf 数据层 / DshAuth / DshRpc / 硬件采集）
-└─ tests/QwenTray.Tests/       ← 127 个单测（xunit 2.5.3 + coverlet，UseWindowsForms=false）
+│  └─ *.cs（21 个：Config / ServiceSpec / Cli / LaunchArgs / LogSink / SvcStatus / SvcLines / SvcConfigDiff / NodeLocator / Perf 数据层 / DshAuth / DshRpc / 硬件采集）
+└─ tests/QwenTray.Tests/       ← 193 个单测（xunit 2.5.3 + coverlet，UseWindowsForms=false）
    ├─ QwenTray.Tests.csproj
-   └─ *Tests.cs（CliOptions / LlamaLogParser / PerfFingerprint / Config / LaunchArgs / LogSink / SvcStatus）
+   └─ *Tests.cs（CliOptions / LlamaLogParser / PerfFingerprint / Config / LaunchArgs / LogSink / NodeLocator / SvcStatus / SvcLines / SvcConfigDiff）
 ```
 
 **归属口径**：碰 `System.Windows.Forms` / `Application` 的**必须留主工程**（例：`AutoStart.cs` 用 `Application.ExecutablePath`，进了 Core 直接 CS0234）。反过来，"只是返回颜色名/中文文本"的**纯映射也算纯逻辑** —— `SvcStatus.Dot` 返回 `"yellow"` 就该进 Core，因为它可测而 UI 面不可测。
@@ -411,8 +413,8 @@ python docs/temp/gov/s4_coverage.py
 
 **S4 的改造验收**：`dotnet test` 93/93 全绿；编译 0 错误 / 30 警告（= S3 基线）；10 项自检与 S3 主树**同时刻**差分 ⇒ 8 项逐字节一致、2 项仅运行时刻差异；另对断言本身做了负向测试（摘掉一个探针 ⇒ 如期 1 个失败）。详见报告 §13。
 
-**S5 的改造验收（S5-1 / S5-2，本阶段部分完成）**：`dotnet test` **127/127**（93 + `LogSink` 9 + `SvcStatus` 25）；编译 0 错误 / 30 警告（无新增）；11 项自检 + `--dump-menu` 与**同机基线**逐字节差分 ⇒ **8 项一致**、3 项差异**逐条定性**全为时刻/环境类；负向测试（改坏 `SvcStatus.State` 的优先级 ⇒ 如期 3 红，还原后 sha256 一致）。⚠️ 基线**必须取在干净 worktree 检出上** —— 主树当时有**另一会话**的在制品，拿主树当基线会把他人的改动算成我的差异。详见报告 §14。
+**S5 的改造验收（S5-1/S5-2 + S5-3/S5-4）**：`dotnet test` **193/193**；编译 0 错误 / 30 警告（无新增）；11 项自检 + `--dump-menu` 与**同机基线**逐字节差分 ⇒ **8 项一致**、3 项差异**逐条定性**全为时刻/环境类（`menu-dump` 归一化"相对时间"后**逐字节一致 ⇒ 菜单可见文本零变化**；`logwin` 仅时间戳 + 1 个会话注入的 `CODEBUDDY_CURRENT_MODEL_ID`；`perf` 仅 `ts`，`cfg` 指纹与统计量全等）；负向测试改坏目标错因 ⇒ 如期红（S5-1/2：`SvcStatus.State` 优先级 3 红；S5-3/4：摘 `Apply` 的 `Batch>0` 守卫 + 把 `Mid` 宽度算错 1 ⇒ 3 红 / 190 通过），还原后与 HEAD 内容一致。⚠️ 基线**必须取在干净 worktree 检出上** —— 主树当时有**另一会话**的在制品，拿主树当基线会把他人的改动算成我的差异（报告 §15.5 另记了 `sha256 -c` 假红这条行尾坑）。详见报告 §14 + §15。
 
-**S5 剩余（S5-3 / S5-4）**：`MenuBuilders` + `ServiceManager` 的**进程编排面**（`Start`/`Stop`/`Restart`/`ReloadSvcConfig`）。这两块的验收门槛是报告 §7 的**托盘行为回归清单**（必须真人逐项点菜单 + 真实拉起/停止模型，自动化覆盖不到）。
+**S5 收口说明（2026-09-12 下午）**：S5 里**能自动验证的部分已全部交完**。原定"把 `MenuBuilders` / `ServiceManager` 搬成**独立类型**"那两块**判定不做** —— 按 §11.3 判据（拆分要看它**解锁了什么下游动作**）它们解锁 0 自动验证，而要动 `TrayApp` 的 ~50 个菜单字段 / 5 个 partial 约 50 处调用点（含 `TrayApp.Dsh.cs::RefreshDshUi`），风险最高且验收只能靠真人过报告 §7 的**托盘行为回归清单 10 项**。真要做得单独开一次带人工回归窗口的任务。`Service` 的 10 个转发属性同理留着（删它们就是 S5-4 的删除清单，编译器逐处报错指路）。
 
 **S3 的改造验收（同机同配置差分法）**：改造前后各跑一遍 `--selftest-*` 全套 + `--dump-menu`，逐字节比对 ⇒ 实质内容一致；`FP-REAL-8081 = PASS (966d1620a3)`；真实 `--bench 8081` 打印 `已记入台账 cfg=966d1620a3`，台账 17 条不新增。基线留档 `~/.workbuddy/_backup/20260912_s3_baseline/`。
