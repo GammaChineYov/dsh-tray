@@ -337,20 +337,22 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
 
 > 拆分是**零逻辑改动**的（`partial` 对编译器是同一类型），但**改代码前必须先找对文件** —— 原来全挤在 `Program.cs` 里的东西现在按职责分了 20 个文件。原文行号对照见 `docs/2026-09-11-architecture-governance.md` §10.1。
 >
-> ⚠️ **S3/S4 起有三个工程**：无 UI 依赖的逻辑层在 `src/QwenTray.Core/`（下表标 **〔Core〕** 的行），单测在 `tests/QwenTray.Tests/`。**加新文件前先想清楚它属于哪边** —— 放进 Core 而它引用了 WinForms，会直接编译失败（这是故意的，见 §12.1）。
+> ⚠️ **S3–S5 起有三个工程**：无 UI 依赖的逻辑层在 `src/QwenTray.Core/`（下表标 **〔Core〕** 的行），单测在 `tests/QwenTray.Tests/`。**加新文件前先想清楚它属于哪边** —— 放进 Core 而它引用了 WinForms，会直接编译失败（这是故意的，见 §12.1）。
 
 | 文件 | 职责 | 关键内容 |
 |---|---|---|
 | `Program2.cs` | **入口** | `Main` + 全部分派、单实例互斥、两条退出信号监听（S4 起命令行**解析**在 `CliOptions`，见下一行） |
 | `src/QwenTray.Core/Cli.cs`〔Core〕 | **命令行解析**（S4 抽出） | `CliOptions.Parse`（纯数据）；`IsDiagnostic`（全部诊断/自检模式）、`IsLockFree`（诊断或 `--bench`）—— 两个判定各被单测**穷举**，新增探针忘了登记就会红 |
+| `src/QwenTray.Core/SvcStatus.cs`〔Core〕 | **服务状态映射 + 探活**（S5 抽出） | `SvcStatus.State/Dot/Enable`（四态文本 / 圆点色名 / 三个启停项可用性，**8 种组合穷举钉住**）；`SvcProbe.PortUp/HealthUp/KillByPort`（端口探活与按端口回收 llama）。⚠️ `PortUp` 与 `HealthUp` **语义不同**（前者"端口上有东西"，后者"响应体含 ok"），别合并 |
 | `TrayApp.cs` | 托盘骨架（partial 1/5） | 全部字段声明、`TrayApp()` 构造函数（建菜单/图标/`clock`）、`dsh-tray.cfg` 读写（`Cfg`/`LoadCfg`/`SaveCfg`/`SaveAllPos`）、`RefreshChecks`、显存分摊提示 |
-| `TrayApp.Services.cs` | 模型服务（partial 2/5） | `PortUp`/`HealthUp`/`KillByPort`、`BuildSvcMenu`/`RefreshSvcMenu`（每模型二级菜单）、`Start`/`Stop`/`StopAll`/`RestartSvc`/`ReloadSvcConfig` |
+| `TrayApp.Services.cs` | 模型服务（partial 2/5） | `BuildSvcMenu`/`RefreshSvcMenu`（每模型二级菜单）、`Start`/`Stop`/`StopAll`/`RestartSvc`/`ReloadSvcConfig`（**进程编排面，S5-4 才搬**）。探活/状态映射已移出，见上一行 |
 | `TrayApp.Dsh.cs` | DSH 与日志（partial 3/5） | `DshUp`/`DshStart`/`DshStop`/`DshRestart`、`ScrubWorkBuddyEnv`/`StripWorkBuddyShim`（崩溃链 A 修复）、`TailLog`/`ClearDshLogFiles`/`OpenDshLog`、`Bg`/`Ui`/`ReportEx`（S0 调度器入口） |
 | `TrayApp.Sessions.cs` | 会话与弹窗（partial 4/5） | `UiThreadProbe`（S0 自检）、dsh 配置 YAML 读写（`ExtractBlock`/`ReplaceBlock`/`EnsureLlamaProvider`）、`OpenPop`/`OpenThin`/`OpenOfficial`、插件管理入口、最近会话（`ReadRecent`/`RebuildRecentMenu`/`DotFor`） |
 | `TrayApp.Lifecycle.cs` | 生命周期与自检（partial 5/5） | `Adopt`（接管外部 llama）、`Tick`（1s 节拍）、`ExitApp`/`ExitFromSignal`/`RestartTray`、全部 `*Probe()` 自检入口 |
 | `LogForm.cs` | 统一日志窗口 | 单窗口双页签 + 工具栏 + 时间戳规则（`Append`/`AppendDsh`/`AppendDshStamp`/`Trim`） |
 | `SvcMenu.cs` | 每模型二级菜单的数据壳 | 纯字段容器（原 `TrayApp` 私有嵌套类 → 顶层 `internal`） |
-| `UiDispatcher.cs` / `LogSink.cs` / `SelfTests.cs` | S0 基础设施 | UI marshal 锚点 / 有界日志缓冲 / 自检实现 |
+| `UiDispatcher.cs` / `SelfTests.cs` | S0 基础设施（留在主工程） | UI marshal 锚点 / 自检实现 |
+| `src/QwenTray.Core/LogSink.cs`〔Core〕 | **有界日志缓冲**（S0 起就是独立类型，S5 进 Core） | 三写一读线程安全、`Length` 单调可当游标、超上限丢**最早**且**至少留一行**、`Read` 对滑出窗口的游标**夹取而不抛**、`Clear` 不重置 `Length`（9 个单测逐条钉住） |
 | `src/QwenTray.Core/Perf*.cs`（5 个）〔Core〕 | 性能**数据层** | `PerfFingerprint`(指纹) → `LlamaLogParser`(stdout 解析) → `PerfModel`(数据模型) → `PerfStore`(存储+闸门) → `PerfSampler`/`PerfRuntime` |
 | `PerfPanel.cs` / `PerfProbe.cs` | 性能**UI 与自检**（留在主工程） | `PerfPanel` 是页签 UI；`PerfProbe` 是 `--selftest-perf` 的探针实现（含 `FP-REAL-8081` 回归锚） |
 | `src/QwenTray.Core/ServiceSpec.cs`〔Core〕 | **配置描述**（S2 切出） | 10 个配置字段 + `ServiceSpec.From(ServiceConfig)` 唯一构造入口。**不引用** `Process`/WinForms` |
@@ -362,20 +364,22 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
 
 **回滚（S1 结构拆分）**：`Program.cs.bak-s1` / `ModelPerf.cs.bak-s1` 是这两个文件的前身（`.cs.bak-*` 后缀不被 SDK 编译）；回滚 = 删掉 20 个新文件 + 把这两个改名回去。
 
-### 12.1 三个工程（S3 分工程 → S4 加测试，2026-09-12）
+### 12.1 三个工程（S3 分工程 → S4 加测试 → S5 补测试，2026-09-12）
 
 ```
 dsh-chat-popup/
 ├─ QwenTray.csproj           ← DSHTray.exe（WinForms 托盘，UseWindowsForms=true）
-│  └─ *.cs（21 个：TrayApp 5 个 partial / Program2 / LogForm / UiDispatcher / Service / …）
+│  └─ *.cs（20 个：TrayApp 5 个 partial / Program2 / LogForm / UiDispatcher / Service / …）
 │     └─ ProjectReference ──┐
 ├─ src/QwenTray.Core/       │
 │  ├─ QwenTray.Core.csproj ─┘  ← QwenTray.Core.dll（UseWindowsForms=false）
-│  └─ *.cs（16 个：Config / ServiceSpec / Cli / LaunchArgs / Perf 数据层 / DshAuth / DshRpc / 硬件采集）
-└─ tests/QwenTray.Tests/       ← 93 个单测（xunit 2.5.3 + coverlet，UseWindowsForms=false）
+│  └─ *.cs（18 个：Config / ServiceSpec / Cli / LaunchArgs / LogSink / SvcStatus / Perf 数据层 / DshAuth / DshRpc / 硬件采集）
+└─ tests/QwenTray.Tests/       ← 127 个单测（xunit 2.5.3 + coverlet，UseWindowsForms=false）
    ├─ QwenTray.Tests.csproj
-   └─ *Tests.cs（CliOptions / LlamaLogParser / PerfFingerprint / Config / LaunchArgs）
+   └─ *Tests.cs（CliOptions / LlamaLogParser / PerfFingerprint / Config / LaunchArgs / LogSink / SvcStatus）
 ```
+
+**归属口径**：碰 `System.Windows.Forms` / `Application` 的**必须留主工程**（例：`AutoStart.cs` 用 `Application.ExecutablePath`，进了 Core 直接 CS0234）。反过来，"只是返回颜色名/中文文本"的**纯映射也算纯逻辑** —— `SvcStatus.Dot` 返回 `"yellow"` 就该进 Core，因为它可测而 UI 面不可测。
 
 **命名空间两边都是 `QwenTray`**（只是程序集不同）⇒ 调用点零改动。
 
@@ -406,5 +410,9 @@ python docs/temp/gov/s4_coverage.py
 ⚠️ 测试**绝不调用 `Config.Load()`** —— 它有写盘副作用（读不到就把默认配置写回进程目录）。要测回填语义请用纯函数 `Config.MergeFrom` / `Config.Merge`。
 
 **S4 的改造验收**：`dotnet test` 93/93 全绿；编译 0 错误 / 30 警告（= S3 基线）；10 项自检与 S3 主树**同时刻**差分 ⇒ 8 项逐字节一致、2 项仅运行时刻差异；另对断言本身做了负向测试（摘掉一个探针 ⇒ 如期 1 个失败）。详见报告 §13。
+
+**S5 的改造验收（S5-1 / S5-2，本阶段部分完成）**：`dotnet test` **127/127**（93 + `LogSink` 9 + `SvcStatus` 25）；编译 0 错误 / 30 警告（无新增）；11 项自检 + `--dump-menu` 与**同机基线**逐字节差分 ⇒ **8 项一致**、3 项差异**逐条定性**全为时刻/环境类；负向测试（改坏 `SvcStatus.State` 的优先级 ⇒ 如期 3 红，还原后 sha256 一致）。⚠️ 基线**必须取在干净 worktree 检出上** —— 主树当时有**另一会话**的在制品，拿主树当基线会把他人的改动算成我的差异。详见报告 §14。
+
+**S5 剩余（S5-3 / S5-4）**：`MenuBuilders` + `ServiceManager` 的**进程编排面**（`Start`/`Stop`/`Restart`/`ReloadSvcConfig`）。这两块的验收门槛是报告 §7 的**托盘行为回归清单**（必须真人逐项点菜单 + 真实拉起/停止模型，自动化覆盖不到）。
 
 **S3 的改造验收（同机同配置差分法）**：改造前后各跑一遍 `--selftest-*` 全套 + `--dump-menu`，逐字节比对 ⇒ 实质内容一致；`FP-REAL-8081 = PASS (966d1620a3)`；真实 `--bench 8081` 打印 `已记入台账 cfg=966d1620a3`，台账 17 条不新增。基线留档 `~/.workbuddy/_backup/20260912_s3_baseline/`。
