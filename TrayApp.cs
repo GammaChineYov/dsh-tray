@@ -309,8 +309,11 @@ public partial class TrayApp : ApplicationContext {
   void SetParam(int m){ paramMode=m; RefreshChecks(); SaveCfg(); string label=m==0?"通用思考 (temp1.0/pres1.5)":m==1?"编码思考 (temp0.6/pres0.0)":"Instruct (temp0.7/pres1.5)"; logForm.Append("推理参数组: "+label+"（重启对应服务后生效）\r\n"); }
   void SetSplit(int m){ splitMode=m; RefreshChecks(); SaveCfg(); logForm.Append("切分模式: "+(m==0?"按层切分 layer":"张量并行 tensor")+"（重启对应服务后生效）\r\n"); }
   void SetKv(int m){ kvMode=m; RefreshChecks(); SaveCfg(); logForm.Append("KV 缓存: "+KvLabel(m)+"（重启对应服务后生效）\r\n"); }
-  static string KvLabel(int m){ return m==0?"默认":m==1?"8bit q8_0":"16bit f16"; }
-  static string CacheRamLabel(int mb){ return mb==0?"禁用":mb<0?"无限制":(mb>=1024&&mb%1024==0)?(mb/1024)+"GB":mb+"M"; }
+  // S5-3（2026-09-12）：档位标签的**实现**已搬进 QwenTray.Core/SvcLines.cs（SvcLinesTests 钉住越界回落）。
+  // 下面两行是**迁移期兼容层** —— 与 Service 上那 10 个转发属性同一惯例：保住既有调用点一行不改，
+  // JIT 会把转发内联掉，无性能损耗。新代码请直接写 `SvcLines.KvLabel(...)` / `SvcLines.CacheRamLabel(...)`。
+  static string KvLabel(int m){ return SvcLines.KvLabel(m); }
+  static string CacheRamLabel(int mb){ return SvcLines.CacheRamLabel(mb); }
   void ToggleBind(){ bindAll=!bindAll; RefreshChecks(); SaveCfg(); logForm.Append("模型监听: "+(bindAll?"0.0.0.0（局域网可访问）":"127.0.0.1（仅本机）")+"（重启对应服务后生效）\r\n"); }
   static void KeepOpen(ToolStripDropDown dd){ dd.Closing += (s,e)=>{ if(e.CloseReason==ToolStripDropDownCloseReason.ItemClicked) e.Cancel=true; }; }
   // 只让指定项「点击后不收起菜单」（其它项照常收起）：Click 先于 Closing 触发，用标志位判定是哪个项点开的收起
@@ -352,8 +355,9 @@ public partial class TrayApp : ApplicationContext {
     if(cacheRamMenu!=null) cacheRamMenu.Text="缓存内存: "+CacheRamLabel(cacheRam);
     if(svcMenus.Count>0) RefreshSvcMenus();   // 参数变化时同步刷新每模型二级菜单的「运行时配置」行
   }
-  static string ParamLabel(int m){ return m==0?"通用思考":m==1?"编码思考":"Instruct"; }
-  static string MtpLabel(int m){ return m==0?"无":m==1?"MTP":"MTP"+m; }
+  // 同上：实现已搬进 SvcLines.cs，这里是迁移期兼容层（调用点零改动）
+  static string ParamLabel(int m){ return SvcLines.ParamLabel(m); }
+  static string MtpLabel(int m){ return SvcLines.MtpLabel(m); }
   // 张量并行时两卡显存估算（GPU0/GPU1 分两行各 1 位小数）：模型权重(GGUF 大小) + KV(按 ctx) + 每卡计算缓冲(≈1.1GB) 按 -ts 比例分摊。
   // 细节（参考模型/ctx/占比）放 ToolTip；可见文本保持短且固定宽度，避免拖动滑块时子菜单宽度抖动（布局震荡）。仅供预览，实际以 llama-server 加载报告为准。
   void VramSplitUpdate(){

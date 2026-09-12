@@ -15,14 +15,26 @@ using Microsoft.Web.WebView2.WinForms;
 namespace QwenTray;
 
 // S1（2026-09-11）拆自 Program.cs（partial 2/5：探活 + 每模型菜单 + 启停）：零逻辑改动，仅位移。
-// S5（2026-09-12）：探活（PortUp/HealthUp/KillByPort）与状态映射（SvcState/SvcDot/SvcEnable）已升格进
-//   QwenTray.Core —— 分别是 SvcProbe / SvcStatus（三态映射现由 SvcStatusTests 穷举钉住，进 dotnet test 链）。
-//   本文件从此只剩「每模型二级菜单」的构建与刷新 + 启停流程编排。
+// S5（2026-09-12）：本文件连挨两刀，都是「把可判定的东西送进 Core」——
+//   ① S5-2 探活（PortUp/HealthUp/KillByPort）与状态映射（SvcState/SvcDot/SvcEnable）→ SvcProbe / SvcStatus；
+//   ② S5-3/4 **文本合成**（档位标签 / 文件名截断 / 时长 / 「运行时配置」6 行 / 状态悬浮）→ SvcLines，
+//      「重读配置」的判定内核（Find + Apply）→ SvcConfigDiff。
+//   本文件从此只剩「每模型二级菜单」的 WinForms 装配 + 启停流程编排 —— 装配搬不进 Core：
+//   Core 工程 UseWindowsForms=false，出现 ToolStripMenuItem 会直接 CS0234（编译器强制，不是约定）。
 public partial class TrayApp {
-  static string FileName(string p){ try{ return Path.GetFileName(p??""); }catch{ return p??""; } }
-  // 中间省略：菜单宽度受模型文件名影响，过长的名字保留头尾（尾部含量化档位，优先保留）
-  static string Mid(string s,int max){ if(string.IsNullOrEmpty(s)||s.Length<=max) return s??""; int keep=max-1, head=keep*2/3, tail=keep-head; return s.Substring(0,head)+"…"+s.Substring(s.Length-tail); }
-  static string Dur(TimeSpan t){ if(t.TotalDays>=1) return (int)t.TotalDays+"d"+(t.Hours>0?t.Hours+"h":""); if(t.TotalHours>=1) return (int)t.TotalHours+"h"+t.Minutes+"m"; if(t.TotalMinutes>=1) return (int)t.TotalMinutes+"m"+t.Seconds+"s"; return Math.Max(0,(int)t.TotalSeconds)+"s"; }
+  // 把 Service + 当前托盘参数拍成 Core 的渲染视图（SvcLines 的输入）。
+  // Core 不能引用 Service（那是带 Process 句柄的运行时袋），所以在这一个口子收拢；
+  // proc 的两次取用都按"取不到就不写进去"处理 —— SvcLines 靠 Pid>0 / StartedAt.HasValue 决定要不要打 pid 行。
+  SvcView ToView(Service svc){
+    var v=new SvcView{ Model=svc.Model, UseMmproj=svc.UseMmproj, Mmproj=svc.Mmproj, Port=svc.Port,
+      Provider=svc.Provider, Batch=svc.Batch, Ubatch=svc.Ubatch,
+      Starting=svc.Starting, Running=svc.Running, PortBusy=svc.PortBusy,
+      RamGb=svc.RamGb, RunCtx=svc.runCtx, RunVision=svc.runVision,
+      Gpu=gpuSel, GpuCount=gpus.Count, SplitMode=splitMode, TsGpu1=tsGpu1, KvMode=kvMode,
+      CtxVal=ctxVal, CacheRam=cacheRam, MtpLevel=mtpLevel, ParamMode=paramMode, BindAll=bindAll };
+    if(svc.Running){ try{ if(svc.proc!=null){ v.Pid=svc.proc.Id; try{ v.StartedAt=svc.proc.StartTime; }catch{} } }catch{} }
+    return v;
+  }
   // —— 每模型二级菜单：构建（元素固定，见 SvcMenu 注释）——
   ToolStripMenuItem BuildSvcMenu(Service svc){
     var m=new SvcMenu(); m.svc=svc;
@@ -65,58 +77,39 @@ public partial class TrayApp {
     bool starting=svc.Starting, running=svc.Running, busy=svc.PortBusy&&!running&&!starting;
     string sig=(starting?"s":running?"r":busy?"b":"x")+"|"+svc.Port+"|"+svc.Model+"|"+ctxVal+"|"+kvMode+"|"+splitMode+"|"+tsGpu1+"|"+cacheRam+"|"+mtpLevel+"|"+paramMode+"|"+gpuSel.CfgString()+"|"+(bindAll?"1":"0")+"|"+svc.runCtx+"|"+(svc.RunVision.HasValue?(svc.RunVision.Value?"1":"0"):"-")+(starting?("|"+(Environment.TickCount-svc.startMs)/1000):"");
     if(sig==m.sig) return; m.sig=sig;
+    var v=ToView(svc);   // 一屏的全部渲染输入；文本合成在 Core 的 SvcLines 里（SvcLinesTests 钉住）
     // —— 状态圆点 + 运行状态行（悬浮给全量）：黄=启动中 绿=运行中 橙=运行中(未托管) 红=未运行 ——
     m.root.Image=DotFor(SvcStatus.Dot(starting,running,busy));
-    m.root.ToolTipText=StatusTip(svc);
+    m.root.ToolTipText=SvcLines.StatusTip(v);
     var sb=new System.Text.StringBuilder("状态："+SvcStatus.State(starting,running,busy));
     if(running){
-      try{ sb.Append(" · pid "+svc.proc.Id); }catch{}
-      if(!starting){ try{ sb.Append(" · 已运行 "+Dur(DateTime.Now-svc.proc.StartTime)); }catch{} }
+      if(v.Pid>0) sb.Append(" · pid "+v.Pid);
+      if(!starting&&v.StartedAt.HasValue) sb.Append(" · 已运行 "+SvcLines.Dur(DateTime.Now-v.StartedAt.Value));
       string ram=svc.RamGb; if(ram!="-") sb.Append(" · 内存 "+ram);
       sb.Append(" · 端口 "+svc.Port);
     } else if(starting){ sb.Append(" · 端口 "+svc.Port+" · 正在加载模型，约 30-60s"); }
     else if(busy){ sb.Append(" · 端口 "+svc.Port+"（点「停止模型」按端口回收）"); }
     else { sb.Append(" · 端口 "+svc.Port); }
     m.status.Text=sb.ToString();
-    m.status.ToolTipText=StatusTip(svc);
+    m.status.ToolTipText=SvcLines.StatusTip(v);
     var en=SvcStatus.Enable(starting,running,busy);
     m.start.Enabled=en.start; m.stop.Enabled=en.stop; m.restart.Enabled=en.restart;
     // —— 运行时配置：环境配置 + llama.cpp 配置（按当前参数实时算；运行中叠加 /props 实测）——
     var b=LaunchArgs.Build(svc.Spec,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll,mtpLevel);
     m.envCuda.Text="    CUDA_VISIBLE_DEVICES = "+(b.envCuda.Length>0?b.envCuda:"（未设置）");
     m.envAllreduce.Text="    GGML_CUDA_ALLREDUCE = "+(b.envAllreduce.Length>0?b.envAllreduce:"（未设置）");
-    var lines=SvcCfgLines(svc,running,b);
+    var lines=SvcLines.CfgLines(v);
     for(int i=0;i<m.cfgLines.Count;i++){ var it=m.cfgLines[i]; if(i<lines.Length){ it.Text=lines[i]; it.Visible=true; } else it.Visible=false; }
     m.cfgLines[0].ToolTipText="完整模型路径: "+svc.Model+(svc.UseMmproj?("\r\nmmproj: "+svc.Mmproj):"");
     m.cppHeader.ToolTipText="完整命令行（点「重启模型」即用它执行）：\r\n"+cfg.LlamaServerExe+" "+string.Join(" ",b.args);
   }
-  // —— 状态/圆点色/启停项可用性映射：S5 起移至 QwenTray.Core/SvcStatus.cs
-  //   （原来在本文件里是 TrayApp 的私有 static ⇒ 只有 --selftest-svcmenu 能枚举到，而那个探针不在 dotnet test 链上）
-  string[] SvcCfgLines(Service svc,bool running,LaunchResult b){
-    var eff=LaunchArgs.EffectiveGpus(gpuSel,gpus.Count);
-    string gpuLine = eff.Count==0 ? "CPU（-ngl 0，无 GPU 加速）"
-      : eff.Count==1 ? ("GPU"+eff[0]+" · -ngl 99 · --split-mode none")
-      : ("GPU"+string.Join("+",eff)+" · -ngl 99 · --split-mode "+(splitMode==0?"layer":"tensor -ts "+(100-tsGpu1)+","+tsGpu1));
-    string mm = svc.UseMmproj ? ("mmproj = "+FileName(svc.Mmproj)) : "无 mmproj";
-    return new string[]{
-      "    模型 = "+Mid(FileName(svc.Model),42)+" · "+mm,
-      "    "+gpuLine,
-      "    上下文 = "+(ctxVal/1024)+"K · KV = "+KvLabel(kvMode)+" · 批 = "+svc.Batch+"/"+svc.Ubatch+" · 缓存内存 = "+CacheRamLabel(cacheRam),
-      "    MTP = "+MtpLabel(mtpLevel)+" · 参数组 = "+ParamLabel(paramMode)+" · flash-attn = "+(eff.Count==0?"关":"on"),
-      "    监听 = "+(bindAll?"0.0.0.0":"127.0.0.1")+":"+svc.Port+" · reasoning = deepseek · jinja",
-      running ? ("    实测 = ctx "+(svc.runCtx>0?(svc.runCtx/1024)+"K":(ctxVal/1024)+"K(未探测)")+" · 视觉 "+(svc.RunVision.HasValue?(svc.RunVision.Value?"支持":"不支持"):"未探测")) : "    实测 = （未运行 → 启动后自动探测 /props）"
-    };
-  }
-  string StatusTip(Service svc){
-    var sb=new System.Text.StringBuilder();
-    sb.AppendLine("状态: "+(svc.Starting?"启动中":svc.Running?"运行中":(svc.PortBusy?"运行中(未托管，可「停止模型」按端口回收)":"未运行")));
-    if(svc.Running){ try{ sb.AppendLine("pid: "+svc.proc.Id+"   启动: "+svc.proc.StartTime.ToString("MM-dd HH:mm:ss")+"   已运行: "+Dur(DateTime.Now-svc.proc.StartTime)); }catch{} sb.AppendLine("内存: "+svc.RamGb); }
-    sb.AppendLine("模型: "+svc.Model);
-    if(svc.UseMmproj) sb.AppendLine("mmproj: "+svc.Mmproj);
-    sb.AppendLine("端口: "+svc.Port+"   provider: "+(string.IsNullOrEmpty(svc.Provider)?"llama-local":svc.Provider));
-    if(svc.Running&&svc.runCtx>0) sb.AppendLine("服务端实测: ctx "+(svc.runCtx/1024)+"K · 视觉 "+(svc.RunVision.HasValue?(svc.RunVision.Value?"支持":"不支持"):"未探测"));
-    return sb.ToString().TrimEnd();
-  }
+  // —— 下面三段 S5（2026-09-12）已移出本文件，改由 Core + dotnet test 承担 ——
+  //   状态 / 圆点色 / 启停可用性映射 → QwenTray.Core/SvcStatus.cs    （SvcStatusTests 穷举 8 组合 × 3 函数）
+  //   「运行时配置」6 行 + 状态悬浮全量 → QwenTray.Core/SvcLines.cs   （SvcLinesTests）
+  //   「重读配置」的差异判定（Find / Apply）→ QwenTray.Core/SvcConfigDiff.cs（SvcConfigDiffTests）
+  //   它们原先都是 TrayApp 的私有 static ⇒ 只有 `--selftest-svcmenu` 能间接枚举到，
+  //   而那个探针**不在** dotnet test 链上（要手动跑托盘自检才会发现回归）。
+  //   顺带清掉一个哑参数：原 SvcCfgLines(…, LaunchResult b) 的 `b` 函数体从未读过（首行自己算 EffectiveGpus）。
   void Start(Service svc){
     if(svc.Running){ Log(svc,svc.Name+" 已在运行 (端口 "+svc.Port+")\r\n"); Ui(()=>RefreshSvcMenus()); return; }
     if(SvcProbe.PortUp(svc.Port)){ Log(svc,"端口 "+svc.Port+" 已有服务在跑（非本应用启动），请先「停止模型」或停用外部进程。\r\n"); Ui(()=>RefreshSvcMenus()); return; }
@@ -178,21 +171,15 @@ public partial class TrayApp {
       if(!File.Exists(Config.Path_)){ Log(svc,"    配置文件不存在，沿用内存参数: "+Config.Path_+"\r\n"); return; }
       AppConfig? fresh=null;
       try{ fresh=System.Text.Json.JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(Config.Path_)); }catch(Exception ex){ Log(svc,"    配置解析失败（沿用内存参数）: "+ex.Message+"\r\n"); }
-      var sc=fresh?.Services?.FirstOrDefault(x=>string.Equals(x.Name,svc.Name,StringComparison.OrdinalIgnoreCase))
-          ?? fresh?.Services?.FirstOrDefault(x=>x.Port==svc.Port);
+      // 挑项 + 逐字段差异判定都走 Core（SvcConfigDiff）—— 三条守卫（Batch/Ubatch 只在 >0 时覆盖、
+      // Provider 只在非空时覆盖、Mmproj 双条件）与"差异顺序 = 日志显示顺序"有穷举单测钉住。
+      var sc=SvcConfigDiff.Find(fresh,svc.Name,svc.Port);
       if(sc!=null){
-        var diffs=new List<string>();
-        if(sc.Model!=svc.Model){ diffs.Add("模型 "+FileName(svc.Model)+" → "+FileName(sc.Model)); svc.Model=sc.Model; }
-        if(sc.Port!=svc.Port){ diffs.Add("端口 "+svc.Port+" → "+sc.Port); svc.Port=sc.Port; }
-        if(sc.UseMmproj!=svc.UseMmproj||sc.Mmproj!=svc.Mmproj){ diffs.Add("mmproj "+FileName(svc.Mmproj)+" → "+(sc.UseMmproj?FileName(sc.Mmproj):"关")); svc.UseMmproj=sc.UseMmproj; svc.Mmproj=sc.Mmproj; }
-        if(sc.Batch>0&&sc.Batch!=svc.Batch){ diffs.Add("批 "+svc.Batch+" → "+sc.Batch); svc.Batch=sc.Batch; }
-        if(sc.Ubatch>0&&sc.Ubatch!=svc.Ubatch){ diffs.Add("ubatch "+svc.Ubatch+" → "+sc.Ubatch); svc.Ubatch=sc.Ubatch; }
-        if(sc.SpecDecode!=svc.SpecDecode){ diffs.Add("SpecDecode "+svc.SpecDecode+" → "+sc.SpecDecode); svc.SpecDecode=sc.SpecDecode; }
-        if(!string.IsNullOrEmpty(sc.Provider)&&sc.Provider!=svc.Provider){ diffs.Add("provider "+svc.Provider+" → "+sc.Provider); svc.Provider=sc.Provider; }
+        var diffs=SvcConfigDiff.Apply(sc,svc.Spec);   // 传 Spec：Apply 就地写穿到服务项
         Log(svc,(diffs.Count>0? "    配置已更新: "+string.Join("；",diffs)+"\r\n" : "    配置无变化\r\n"));
       } else Log(svc,"    dsh-tray-config.json 中无同名/同端口服务项（沿用内存参数）\r\n");
       LoadCfg(); RefreshChecks();   // 托盘参数（ctx/KV/切分/MTP/GPU/缓存内存/监听…）即时重读
-      Log(svc,"    当前参数: ctx="+(ctxVal/1024)+"K | KV="+KvLabel(kvMode)+" | 切分="+(splitMode==0?"layer":"tensor "+(100-tsGpu1)+","+tsGpu1)+" | MTP="+MtpLabel(mtpLevel)+" | 缓存内存="+CacheRamLabel(cacheRam)+" | GPU="+gpuSel.ShortLabel()+"\r\n");
+      Log(svc,"    当前参数: ctx="+(ctxVal/1024)+"K | KV="+SvcLines.KvLabel(kvMode)+" | 切分="+(splitMode==0?"layer":"tensor "+(100-tsGpu1)+","+tsGpu1)+" | MTP="+SvcLines.MtpLabel(mtpLevel)+" | 缓存内存="+SvcLines.CacheRamLabel(cacheRam)+" | GPU="+gpuSel.ShortLabel()+"\r\n");
     }catch(Exception ex){ Log(svc,"    重读配置失败（沿用内存参数）: "+ex.Message+"\r\n"); }
   }
 
