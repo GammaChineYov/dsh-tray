@@ -15,30 +15,14 @@ using Microsoft.Web.WebView2.WinForms;
 namespace QwenTray;
 
 // S1（2026-09-11）拆自 Program.cs（partial 2/5：探活 + 每模型菜单 + 启停）：零逻辑改动，仅位移。
+// S5（2026-09-12）：探活（PortUp/HealthUp/KillByPort）与状态映射（SvcState/SvcDot/SvcEnable）已升格进
+//   QwenTray.Core —— 分别是 SvcProbe / SvcStatus（三态映射现由 SvcStatusTests 穷举钉住，进 dotnet test 链）。
+//   本文件从此只剩「每模型二级菜单」的构建与刷新 + 启停流程编排。
 public partial class TrayApp {
-  bool PortUp(int port){ try{ using(var wc=new System.Net.WebClient()){ wc.DownloadString("http://127.0.0.1:"+port+"/health"); return true; } }catch{} return false; }
-  // llama-server /health 就绪探测（{"status":"ok"}）：false = 未就绪 / 进程未起
-  bool HealthUp(int port){ try{ using(var wc=new System.Net.WebClient()){ wc.Encoding=System.Text.Encoding.UTF8; return wc.DownloadString("http://127.0.0.1:"+port+"/health").Contains("ok"); } }catch{} return false; }
   static string FileName(string p){ try{ return Path.GetFileName(p??""); }catch{ return p??""; } }
   // 中间省略：菜单宽度受模型文件名影响，过长的名字保留头尾（尾部含量化档位，优先保留）
   static string Mid(string s,int max){ if(string.IsNullOrEmpty(s)||s.Length<=max) return s??""; int keep=max-1, head=keep*2/3, tail=keep-head; return s.Substring(0,head)+"…"+s.Substring(s.Length-tail); }
   static string Dur(TimeSpan t){ if(t.TotalDays>=1) return (int)t.TotalDays+"d"+(t.Hours>0?t.Hours+"h":""); if(t.TotalHours>=1) return (int)t.TotalHours+"h"+t.Minutes+"m"; if(t.TotalMinutes>=1) return (int)t.TotalMinutes+"m"+t.Seconds+"s"; return Math.Max(0,(int)t.TotalSeconds)+"s"; }
-  // 按端口收 llama-server：停止/重启的兜底（svc.proc 为空、或该进程由外部/上一实例启动）。只杀进程名含 llama 的，避免误伤。
-  int KillByPort(int port){
-    try{
-      var psi=new ProcessStartInfo("netstat","-ano"){UseShellExecute=false,RedirectStandardOutput=true,CreateNoWindow=true};
-      var p=Process.Start(psi); if(p==null) return 0;
-      string o=p.StandardOutput.ReadToEnd(); p.WaitForExit(3000);
-      foreach(var line in o.Split('\n')){
-        if(!line.Contains(":"+port)||!line.Contains("LISTENING")) continue;
-        var parts=line.Split(new char[]{' '},StringSplitOptions.RemoveEmptyEntries);
-        int pid; if(parts.Length==0||!int.TryParse(parts[parts.Length-1],out pid)) return 0;
-        try{ var pr=Process.GetProcessById(pid); if(pr.ProcessName.ToLowerInvariant().Contains("llama")){ pr.Kill(); return pid; } }catch{}
-        return 0;
-      }
-    }catch{}
-    return 0;
-  }
   // —— 每模型二级菜单：构建（元素固定，见 SvcMenu 注释）——
   ToolStripMenuItem BuildSvcMenu(Service svc){
     var m=new SvcMenu(); m.svc=svc;
@@ -82,9 +66,9 @@ public partial class TrayApp {
     string sig=(starting?"s":running?"r":busy?"b":"x")+"|"+svc.Port+"|"+svc.Model+"|"+ctxVal+"|"+kvMode+"|"+splitMode+"|"+tsGpu1+"|"+cacheRam+"|"+mtpLevel+"|"+paramMode+"|"+gpuSel.CfgString()+"|"+(bindAll?"1":"0")+"|"+svc.runCtx+"|"+(svc.RunVision.HasValue?(svc.RunVision.Value?"1":"0"):"-")+(starting?("|"+(Environment.TickCount-svc.startMs)/1000):"");
     if(sig==m.sig) return; m.sig=sig;
     // —— 状态圆点 + 运行状态行（悬浮给全量）：黄=启动中 绿=运行中 橙=运行中(未托管) 红=未运行 ——
-    m.root.Image=DotFor(SvcDot(starting,running,busy));
+    m.root.Image=DotFor(SvcStatus.Dot(starting,running,busy));
     m.root.ToolTipText=StatusTip(svc);
-    var sb=new System.Text.StringBuilder("状态："+SvcState(starting,running,busy));
+    var sb=new System.Text.StringBuilder("状态："+SvcStatus.State(starting,running,busy));
     if(running){
       try{ sb.Append(" · pid "+svc.proc.Id); }catch{}
       if(!starting){ try{ sb.Append(" · 已运行 "+Dur(DateTime.Now-svc.proc.StartTime)); }catch{} }
@@ -95,7 +79,7 @@ public partial class TrayApp {
     else { sb.Append(" · 端口 "+svc.Port); }
     m.status.Text=sb.ToString();
     m.status.ToolTipText=StatusTip(svc);
-    var en=SvcEnable(starting,running,busy);
+    var en=SvcStatus.Enable(starting,running,busy);
     m.start.Enabled=en.start; m.stop.Enabled=en.stop; m.restart.Enabled=en.restart;
     // —— 运行时配置：环境配置 + llama.cpp 配置（按当前参数实时算；运行中叠加 /props 实测）——
     var b=LaunchArgs.Build(svc.Spec,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll,mtpLevel);
@@ -106,10 +90,8 @@ public partial class TrayApp {
     m.cfgLines[0].ToolTipText="完整模型路径: "+svc.Model+(svc.UseMmproj?("\r\nmmproj: "+svc.Mmproj):"");
     m.cppHeader.ToolTipText="完整命令行（点「重启模型」即用它执行）：\r\n"+cfg.LlamaServerExe+" "+string.Join(" ",b.args);
   }
-  // —— 纯函数：状态/圆点色/启停项可用性映射（与 UI 解耦 → --selftest-svcmenu 可直接枚举四种态验证）——
-  static string SvcState(bool starting,bool running,bool busy){ return starting?"启动中":running?"运行中":busy?"运行中(未托管)":"未运行"; }
-  static string SvcDot(bool starting,bool running,bool busy){ return starting?"yellow":running?"green":busy?"orange":"red"; }
-  static (bool start,bool stop,bool restart) SvcEnable(bool starting,bool running,bool busy){ return (!running&&!starting&&!busy, running||starting||busy, true); }
+  // —— 状态/圆点色/启停项可用性映射：S5 起移至 QwenTray.Core/SvcStatus.cs
+  //   （原来在本文件里是 TrayApp 的私有 static ⇒ 只有 --selftest-svcmenu 能枚举到，而那个探针不在 dotnet test 链上）
   string[] SvcCfgLines(Service svc,bool running,LaunchResult b){
     var eff=LaunchArgs.EffectiveGpus(gpuSel,gpus.Count);
     string gpuLine = eff.Count==0 ? "CPU（-ngl 0，无 GPU 加速）"
@@ -137,7 +119,7 @@ public partial class TrayApp {
   }
   void Start(Service svc){
     if(svc.Running){ Log(svc,svc.Name+" 已在运行 (端口 "+svc.Port+")\r\n"); Ui(()=>RefreshSvcMenus()); return; }
-    if(PortUp(svc.Port)){ Log(svc,"端口 "+svc.Port+" 已有服务在跑（非本应用启动），请先「停止模型」或停用外部进程。\r\n"); Ui(()=>RefreshSvcMenus()); return; }
+    if(SvcProbe.PortUp(svc.Port)){ Log(svc,"端口 "+svc.Port+" 已有服务在跑（非本应用启动），请先「停止模型」或停用外部进程。\r\n"); Ui(()=>RefreshSvcMenus()); return; }
     var build=LaunchArgs.Build(svc.Spec,gpuSel,ctxVal,paramMode,splitMode,kvMode,cacheRam,tsGpu1,gpus.Count,bindAll,mtpLevel);
     var psi=new ProcessStartInfo(cfg.LlamaServerExe,string.Join(" ",build.args)){UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true,CreateNoWindow=true};
     if(build.envCuda.Length>0) psi.Environment["CUDA_VISIBLE_DEVICES"]=build.envCuda;
@@ -168,8 +150,8 @@ public partial class TrayApp {
   void Stop(Service svc){
     bool did=false;
     if(svc.proc!=null&&!svc.proc.HasExited){ Log(svc,">>> 停止 "+svc.Name+" ...\r\n"); try{ svc.proc.Kill(); did=true; }catch{} svc.proc=null; }
-    if(PortUp(svc.Port)){
-      int pid=KillByPort(svc.Port);
+    if(SvcProbe.PortUp(svc.Port)){
+      int pid=SvcProbe.KillByPort(svc.Port);
       if(pid>0){ Log(svc,"    已按端口回收 llama-server (pid "+pid+")\r\n"); did=true; }
       else if(!did) Log(svc,"    端口 "+svc.Port+" 被非 llama 进程占用，未处理。\r\n");
     }
@@ -183,7 +165,7 @@ public partial class TrayApp {
     logForm.Append(">>> 重启模型 "+svc.Name+"（重读配置；DSH 与 dsh 会话不受影响）\r\n");
     ReloadSvcConfig(svc);
     Stop(svc);
-    for(int i=0;i<12;i++){ if(!PortUp(svc.Port)) break; System.Threading.Thread.Sleep(500); }  // 等端口释放（最多 6s）
+    for(int i=0;i<12;i++){ if(!SvcProbe.PortUp(svc.Port)) break; System.Threading.Thread.Sleep(500); }  // 等端口释放（最多 6s）
     System.Threading.Thread.Sleep(300);
     Start(svc);
   }
@@ -215,4 +197,3 @@ public partial class TrayApp {
   }
 
 }
-

@@ -39,7 +39,7 @@ public partial class TrayApp {
         Task.Run(()=>{
           foreach(var t in snap){
             if(t.starting){
-              if(HealthUp(t.svc.Port)){ long ms=t.svc.startMs; t.svc.Starting=false; t.svc.startMs=0; t.svc.runCtx=0; t.svc.runVision=-1;
+              if(SvcProbe.HealthUp(t.svc.Port)){ long ms=t.svc.startMs; t.svc.Starting=false; t.svc.startMs=0; t.svc.runCtx=0; t.svc.runVision=-1;
                 var pr=ProbeLlamaProps(t.svc.Port); if(pr.Item1>0) t.svc.runCtx=pr.Item1; if(pr.Item2.HasValue) t.svc.runVision=pr.Item2.Value?1:0;
                 long used=(ms>0?Math.Max(0,(Environment.TickCount-ms)/1000):0);
                 logForm.Append("["+t.svc.Name+"] 已就绪（端口 "+t.svc.Port+"，耗时 "+used+"s）\r\n");
@@ -48,7 +48,7 @@ public partial class TrayApp {
               var pr=ProbeLlamaProps(t.svc.Port); if(pr.Item1>0) t.svc.runCtx=pr.Item1; if(pr.Item2.HasValue) t.svc.runVision=pr.Item2.Value?1:0;
             } else {
               // 未运行：端口是否被外部/上一实例的 llama 占用（占用 → 状态行标注、允许「停止模型」兜底回收，并尝试接管）
-              bool busy=HealthUp(t.svc.Port);
+              bool busy=SvcProbe.HealthUp(t.svc.Port);
               if(busy){ t.svc.PortBusy=true; if(!t.svc.Running) Adopt(t.svc); }
               else t.svc.PortBusy=false;
             }
@@ -212,15 +212,15 @@ public partial class TrayApp {
     sb.AppendLine("SVC MENU PROBE (ascii-anchor; svcmenus="+svcMenus.Count+")");
     sb.AppendLine("=== 状态映射矩阵（starting,running,busy → 圆点色 / 状态文本 / 启停可用）===");
     foreach(var t in new (bool s,bool r,bool b)[]{ (false,false,false),(true,false,false),(false,true,false),(false,false,true) }){
-      var en=SvcEnable(t.s,t.r,t.b);
+      var en=SvcStatus.Enable(t.s,t.r,t.b);
       sb.AppendLine(string.Format("starting={0,-5} running={1,-5} busy={2,-5} → 圆点={3,-7} 状态={4,-14} 启动={5,-5} 重启={6,-5} 停止={7}",
-        t.s,t.r,t.b,SvcDot(t.s,t.r,t.b),SvcState(t.s,t.r,t.b),en.start,en.restart,en.stop));
+        t.s,t.r,t.b,SvcStatus.Dot(t.s,t.r,t.b),SvcStatus.State(t.s,t.r,t.b),en.start,en.restart,en.stop));
     }
     sb.AppendLine();
     sb.AppendLine("=== 真实端口探测（只读：Adopt + /health + /props；不启停任何服务）===");
     foreach(var m in svcMenus) Adopt(m.svc);                       // 复刻 Tick：接管已在端口上跑的 llama（外部/上一实例启动的）
     foreach(var m in svcMenus){
-      var s=m.svc; bool up=HealthUp(s.Port); s.PortBusy=up&&!s.Running;
+      var s=m.svc; bool up=SvcProbe.HealthUp(s.Port); s.PortBusy=up&&!s.Running;
       if(up){ var pr=ProbeLlamaProps(s.Port); if(pr.Item1>0) s.runCtx=pr.Item1; if(pr.Item2.HasValue) s.runVision=pr.Item2.Value?1:0; }
       sb.AppendLine("  "+s.Name+"  端口 "+s.Port+"  health="+(up?"UP":"down")+"  进程="+(s.Running?"已接管":"未接管")+"  实测ctx="+(s.runCtx>0?(s.runCtx/1024)+"K":"-")+"  视觉="+(s.RunVision.HasValue?(s.RunVision.Value?"支持":"不支持"):"-"));
     }
@@ -231,7 +231,7 @@ public partial class TrayApp {
       m.sig=""; RefreshSvcMenu(m);   // 清签名强制重算
       bool busy=s.PortBusy&&!s.Running&&!s.Starting;
       sb.AppendLine("["+s.Name+" ("+s.Port+")]");
-      sb.AppendLine("    一级项文本 = "+m.root.Text+"   圆点="+SvcDot(s.Starting,s.Running,busy));
+      sb.AppendLine("    一级项文本 = "+m.root.Text+"   圆点="+SvcStatus.Dot(s.Starting,s.Running,busy));
       sb.AppendLine("    状态行 = "+m.status.Text);
       sb.AppendLine("    启用 = 启动:"+m.start.Enabled+" 重启:"+m.restart.Enabled+" 停止:"+m.stop.Enabled);
       sb.AppendLine("    "+m.envCuda.Text.Trim());
