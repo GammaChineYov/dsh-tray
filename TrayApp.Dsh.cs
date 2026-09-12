@@ -37,6 +37,11 @@ public partial class TrayApp {
       return;
     }
     HealProfileOrphanLock(true);   // 启动前清孤儿写锁，否则 composeProfile 必 2s 超时崩（见方法注释）
+    // S5（2026-09-12）：node 版本目录会被 WorkBuddy 轮转回收（22.22.2-2 → -3，旧目录直接消失），
+    // 配置里的绝对路径随之失效 → Process.Start 抛"系统找不到指定的文件" → 菜单「启动 DSH」永远失败。
+    // 这里做一次自愈解析（只读，不回写配置）：配置有效则原样用，失效则退到 versions\current。
+    string dshNode=NodeLocator.Resolve(cfg.DshNodeExe,out string nodeNote);
+    string nodeNoteTxt=nodeNote.Length>0?" | node: "+nodeNote:"";
     string outLog=string.IsNullOrEmpty(cfg.DshOutLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-out.log"):cfg.DshOutLog;
     string errLog=string.IsNullOrEmpty(cfg.DshErrLog)?Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"dsh-web-err.log"):cfg.DshErrLog;
     dshState=1; dshStartMs=Environment.TickCount; dshTimeoutLogged=false; Ui(()=>RefreshDshUi());
@@ -53,7 +58,7 @@ public partial class TrayApp {
       if(disabledDevPlugins.Count>0) PluginCenter.ApplyDevDisabled(cfg,disabledDevPlugins);   // 幂等，保证注入插件禁用清单与 cfg 一致
     }catch(Exception ex){ patchNote=" | patch 生成失败: "+ex.Message; }
     try{
-      var psi=new ProcessStartInfo(cfg.DshNodeExe){ WorkingDirectory=cfg.DshWorkDir, UseShellExecute=false, CreateNoWindow=true, WindowStyle=ProcessWindowStyle.Hidden, RedirectStandardOutput=true, RedirectStandardError=true, Arguments=dshArgs };
+      var psi=new ProcessStartInfo(dshNode){ WorkingDirectory=cfg.DshWorkDir, UseShellExecute=false, CreateNoWindow=true, WindowStyle=ProcessWindowStyle.Hidden, RedirectStandardOutput=true, RedirectStandardError=true, Arguments=dshArgs };
       envNote=ScrubWorkBuddyEnv(psi);   // 关键：不清会把 WorkBuddy 的 safe-delete 守卫带进 dsh → 删锁被拒 → 孤儿锁
       var p=Process.Start(psi);
       if(p==null){ logForm.Append(">>> 启动 DSH 失败（Process.Start 返回 null）\r\n"); dshState=0; Ui(()=>RefreshDshUi()); return; }
@@ -61,7 +66,7 @@ public partial class TrayApp {
       p.OutputDataReceived+=(o,e)=>{ if(!string.IsNullOrEmpty(e.Data)){ try{ File.AppendAllText(outLog,Stamp1Line(e.Data)); }catch{} } };
       p.ErrorDataReceived+=(o,e)=>{ if(!string.IsNullOrEmpty(e.Data)){ try{ File.AppendAllText(errLog,Stamp1Line(e.Data)); }catch{} } };
       p.BeginOutputReadLine(); p.BeginErrorReadLine();
-      logForm.Append(">>> 启动 DSH：\""+cfg.DshNodeExe+"\" \""+cfg.DshCliBinJs+"\" "+(dshArgs.Contains("--patch")?"--profile web --patch（安全模式/禁用清单）":"web")+"（工作目录 "+cfg.DshWorkDir+"），等待端口 3080 就绪 ..."+patchNote+(envNote.Length>0?" | 环境清洗: "+envNote:"")+"\r\n");
+      logForm.Append(">>> 启动 DSH：\""+dshNode+"\" \""+cfg.DshCliBinJs+"\" "+(dshArgs.Contains("--patch")?"--profile web --patch（安全模式/禁用清单）":"web")+"（工作目录 "+cfg.DshWorkDir+"），等待端口 3080 就绪 ..."+patchNote+nodeNoteTxt+(envNote.Length>0?" | 环境清洗: "+envNote:"")+"\r\n");
       logForm.Append("    stdout→"+outLog+"\r\n    stderr→"+errLog+"\r\n");
     }catch(Exception ex){ logForm.Append(">>> 启动 DSH 失败: "+ex.Message+"\r\n"); dshState=0; Ui(()=>RefreshDshUi()); Ui(()=>{ try{ MessageBox.Show("启动 DSH 失败: "+ex.Message); }catch{} }); }
   }

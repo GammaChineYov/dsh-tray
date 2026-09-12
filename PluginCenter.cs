@@ -64,7 +64,10 @@ public static class PluginCenter {
   static void ParseDump(AppConfig cfg, PluginInventory inv){
     try{
       if(string.IsNullOrEmpty(cfg.DshNodeExe) || string.IsNullOrEmpty(cfg.DshCliBinJs)){ inv.DumpError = "未配置 DshNodeExe/DshCliBinJs"; return; }
-      var psi = new ProcessStartInfo(cfg.DshNodeExe, "\"" + cfg.DshCliBinJs + "\" --profile web --dump-config"){
+      // S5（2026-09-12）：node 版本目录会被 WorkBuddy 轮转回收 —— 配置失效时自愈，否则 dump-config
+      // 起不来会被静默降级成"entry 为静态推导"（安全模式白名单随之失真）。
+      string nodeExe = NodeLocator.Resolve(cfg.DshNodeExe, out _);
+      var psi = new ProcessStartInfo(nodeExe, "\"" + cfg.DshCliBinJs + "\" --profile web --dump-config"){
         WorkingDirectory = string.IsNullOrEmpty(cfg.DshWorkDir) ? Path.GetDirectoryName(cfg.DshCliBinJs) ?? "" : cfg.DshWorkDir,
         UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true
       };
