@@ -101,6 +101,25 @@ public class LaunchArgsTests {
     Assert.True(Has(r.args, "--cont-batching"));
   }
 
+  // 2026-09-13：L3 硬盘层原语（--slot-save-path）。
+  // 🔑 它是"给不给 /slots action 端点"的唯一开关：不给 ⇒ save/restore 一律 501。
+  //   所以「留空必须彻底不出现」和「给了必须原样带路径」两条都要钉住。
+  [Fact] public void SlotSavePath_OnlyAddedWhenProvided() {
+    var off = LaunchArgs.Build(Spec(), new GpuSelection{UseAll=true}, 8192,0,0,0,0,50,2);
+    Assert.False(Has(off.args, "--slot-save-path"));    // 默认（旧调用点）行为不变
+
+    var on = LaunchArgs.Build(Spec(), new GpuSelection{UseAll=true}, 8192,0,0,0,0,50,2, true, 0, @"E:\kv_cache\slots");
+    Assert.Equal(@"E:\kv_cache\slots", Val(on.args, "--slot-save-path"));
+
+    // 空白串按"未提供"处理（cfg 里被清空的路径不该变成 `--slot-save-path ""`）
+    var blank = LaunchArgs.Build(Spec(), new GpuSelection{UseAll=true}, 8192,0,0,0,0,50,2, true, 0, "   ");
+    Assert.False(Has(blank.args, "--slot-save-path"));
+  }
+
+  [Fact] public void DefaultSlotSavePath_IsUnderKvCacheRoot() {
+    Assert.Equal(@"E:\kv_cache\slots", LaunchArgs.DefaultSlotSavePath);
+  }
+
   [Fact] public void SamplerMode_SelectsTheDocumentedPreset() {
     Assert.Equal("1.0", Val(LaunchArgs.Build(Spec(), new GpuSelection{UseAll=true},8192, 0,0,0,0,50,2).args, "--temp"));
     Assert.Equal("0.7", Val(LaunchArgs.Build(Spec(), new GpuSelection{UseAll=true},8192, 2,0,0,0,50,2).args, "--temp"));
@@ -160,7 +179,7 @@ public class LaunchArgsTests {
 
   [Fact] public void ContextAndCacheRamOptionTables_AreTheDocumentedOnes() {
     Assert.Equal(new[] { 8192, 16384, 32768, 65536, 131072, 196608, 262144 }, LaunchArgs.CtxOptions);
-    Assert.Equal(new[] { 512, 1024, 2048, 4096, -1, 0 }, LaunchArgs.CacheRamOptions);
+    Assert.Equal(new[] { 512, 1024, 2048, 4096, 8192, 16384, -1, 0 }, LaunchArgs.CacheRamOptions);
   }
 
   // --- Describe：菜单/日志里给人看的那一行 ---

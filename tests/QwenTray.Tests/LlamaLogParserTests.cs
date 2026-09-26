@@ -66,4 +66,37 @@ public class LlamaLogParserTests {
   [Fact] public void ZeroMs_IsRejected() {
     Assert.False(LlamaLogParser.TryParse("prompt eval time = 0.00 ms / 100 tokens", out _, out _, out _, out _));
   }
+
+  // ---------- prompt cache（--cache-ram）状态行 ----------
+  // 样本逐字取自实测（llama-b10797 + `-lv 4`，9B/--cache-ram 512）。
+  const string CacheStateLine = "0.03.297.635 I srv        update:  - cache state: 2 prompts, 12.345 MiB (limits: 512.000 MiB, 8192 tokens, 536870912 est)";
+
+  [Fact] public void CacheState_IsParsed() {
+    Assert.True(LlamaLogParser.TryParseCacheState(CacheStateLine, out var prompts, out var usedMib, out var limitMib));
+    Assert.Equal(2, prompts);
+    Assert.Equal(12, usedMib);      // 四舍五入到整 MiB（tooltip 只显示整数）
+    Assert.Equal(512, limitMib);
+  }
+
+  // 空缓存（刚启动就 update 一次）：用量 0 但**上限仍在** —— 不能把 0 误判成"没拿到"
+  [Fact] public void CacheState_ZeroUsage_StillReportsLimit() {
+    Assert.True(LlamaLogParser.TryParseCacheState("srv update:  - cache state: 0 prompts, 0.000 MiB (limits: 2048.000 MiB, 262144 tokens, 0 est)",
+      out var prompts, out var usedMib, out var limitMib));
+    Assert.Equal(0, prompts);
+    Assert.Equal(0, usedMib);
+    Assert.Equal(2048, limitMib);
+  }
+
+  // 负向：管道里绝大多数行都与缓存无关，必须一律拒绝（否则会把脏数据写进 tooltip）
+  [Fact] public void CacheState_RejectsUnrelatedLines() {
+    Assert.False(LlamaLogParser.TryParseCacheState("llama_perf_context_print:        load time =     987.65 ms", out _, out _, out _));
+    Assert.False(LlamaLogParser.TryParseCacheState("prompt eval time =    2731.49 ms /  4696 tokens", out _, out _, out _));
+    Assert.False(LlamaLogParser.TryParseCacheState("", out _, out _, out _));
+    Assert.False(LlamaLogParser.TryParseCacheState(null, out _, out _, out _));
+  }
+
+  // 负向：有 "cache state:" 字样但格式不全（缺 limits 段）⇒ 拒绝，别拿半截数据凑数
+  [Fact] public void CacheState_RejectsTruncatedLine() {
+    Assert.False(LlamaLogParser.TryParseCacheState("srv update: - cache state: 3 prompts, 9.5 MiB", out _, out _, out _));
+  }
 }

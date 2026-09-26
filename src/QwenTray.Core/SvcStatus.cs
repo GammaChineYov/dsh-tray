@@ -52,6 +52,54 @@ public static class SvcProbe {
     return false;
   }
 
+  // KV cache 用量/总量（token）—— 端口上 llama 的实时占用。
+  //
+  // 为什么走 /slots 而不是 /metrics：llama.cpp（b10797）的 /metrics 是 **穷举固定清单**（见
+  // tools/server/server-task.cpp 的 server_task_result_metrics::to_metrics()），只有吞吐/计数类 15 项，
+  // **没有**任何 KV cache 指标。KV 只能这样近似：
+  //   总量 = /props 的 default_generation_settings.n_ctx（kv_unified 默认开启 ⇒ 该值就是全量序列上下文，
+  //          不是「每 slot × n_slots」；/slots 每项的 n_ctx 报同一个值，别当 per-slot 去乘）
+  //   用量 = /slots 各项 n_prompt_tokens 求和（= 各 slot 当前 KV 中持有的 prompt token 数）
+  // ⚠️ 语义边界：n_prompt_tokens 只在 slot **跑过任务**时才出现（否则 /slots 里根本没这个字段）⇒
+  //    服务空转/从未收过请求时用量读作 0；它也**不含**生成中尚未落定的部分。故这是"近似"而非精确占用。
+  public static (int used, int total, int slots) KvUsage(int port) {
+    int used = 0, total = 0, slots = 0;
+    try {
+      using (var wc = new System.Net.WebClient()) {
+        wc.Encoding = System.Text.Encoding.UTF8;
+        var props = wc.DownloadString("http://127.0.0.1:" + port + "/props");
+        var m = System.Text.RegularExpressions.Regex.Match(props, "\"n_ctx\"\\s*:\\s*(\\d+)");
+        if (m.Success) int.TryParse(m.Groups[1].Value, out total);
+        var sl = wc.DownloadString("http://127.0.0.1:" + port + "/slots");
+        // 正则要求引号后紧跟冒号 ⇒ 不会误匹配 "n_prompt_tokens_processed" / "n_prompt_tokens_cache"
+        foreach (System.Text.RegularExpressions.Match x in System.Text.RegularExpressions.Regex.Matches(sl, "\"n_prompt_tokens\"\\s*:\\s*(\\d+)")) {
+          int v; if (int.TryParse(x.Groups[1].Value, out v)) used += v;
+        }
+        slots = System.Text.RegularExpressions.Regex.Matches(sl, "\"n_ctx\"\\s*:").Count;
+      }
+    } catch { }
+    return (used, total, slots);
+  }
+
+  // 端口上的 llama 是否有请求正在处理（/slots 任一项 "is_processing":true）。
+  //
+  // 🔴 这是「空闲自动回收工作集」的**唯一前置条件**，为什么必须有它：
+  //    EmptyWorkingSet 会把权重 mmap 页推回 standby，下次访问按需重新缺页 —— 空闲时这样做零代价
+  //    （实测速度不变），但**正在推理时**就等于把要用的页主动踢出去，换来一串硬缺页。
+  //    所以宁可不回收，也不要在不确定时抖进程。
+  //
+  // 保守语义（刻意）：**探不到 ⇒ 返回 true（当"忙"）**。代价是"服务器挂了就不回收"（本来也没什么可收敛的），
+  // 收益是绝不在探测失败时误伤正在跑的推理。
+  public static bool Busy(int port) {
+    try {
+      using (var wc = new System.Net.WebClient()) {
+        wc.Encoding = System.Text.Encoding.UTF8;
+        var sl = wc.DownloadString("http://127.0.0.1:" + port + "/slots");
+        return System.Text.RegularExpressions.Regex.IsMatch(sl, "\"is_processing\"\\s*:\\s*true");
+      }
+    } catch { return true; }
+  }
+
   // 按端口收 llama-server：停止/重启的兜底（proc 为空、或该进程由外部/上一实例启动）。
   // ⚠️ 只杀进程名含 llama 的，避免误伤端口上恰好存在的其它服务。
   public static int KillByPort(int port) {

@@ -21,3 +21,7 @@ TestResults/
 # 记忆 / 待办 / 项目数据（本地工作数据，不进公开仓库）
 /.workbuddy/
 
+
+# 本地备份与临时发布产物（不入公开仓库）
+_backup/
+publish-test/

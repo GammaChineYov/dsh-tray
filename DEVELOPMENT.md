@@ -24,7 +24,15 @@
 
 ## 2. 单实例与自启（防双托盘）
 
-- 进程级单实例互斥锁已内建：Local\DSH托盘_SingleInstance，后到实例静默退出。
+- 进程级单实例互斥锁已内建：Local\DSH托盘_SingleInstance，后到实例**不产生第二托盘**（结果仍是单托盘）。
+- **图标自愈（2026-09-22）**：后到实例不再无条件静默退出，改为两级处置 ——
+  ① 先发 `Local\DSH托盘_Resurrect` 请主实例重挂通知区图标；主实例**在 UI 线程**挂好后回执
+     `Local\DSH托盘_ResurrectAck`（1.5s 内收到 ⇒ 活托盘，后到实例静默退出）。
+  ② 收不到回执（无监听者 = 旧构建残留 / UI 线程僵死）⇒ `KillStaleTrays()` 清同名僵尸后本实例接管，
+     保证「双击必有图标」。仍抢不到锁 ⇒ 按契约放弃。
+  起因：托盘进程曾**活着但图标被通知区丢弃**（无头托盘），而旧逻辑让用户再点一次也静默无反应 ⇒ 只能 taskkill。
+  ⚠️ 改动此项必须同步保持：新信号一律**不占锁**、不在 UI 线程外碰 `icon`/菜单；`--selftest-exit`
+  须输出 `resurrect ... listener=` 行（也是 apply 脚本判定产物为新版的锚点）。
 - **新增诊断模式（如 --dump-menu / --selftest-logwin）必须跳过互斥检查**，否则跑不起来。
 - 开机自启：启动文件夹只允许**一个**指向 DSHTray.exe 的快捷方式。
   改名/改入口后务必删除旧名残留（曾因 QwenLlamaTray.lnk 残留导致开机双托盘）。
@@ -35,7 +43,7 @@
 当前层级（2026-09 基线）：
 
 ```
-DSH (状态圆点: ●绿运行/●黄启动中/●红未启动)   ← 顶层第一项
+DSH (状态圆点: ●绿运行/●黄启动中/●红未启动)   ← 顶层第一项；未启动(红)时**直接点本项 = 快捷启动 DSH**（§11.9）
  ├─ 状态：…（禁用信息行）
  ├─ 启动 DSH / 重启 DSH / 停止 DSH
  ├─ 查看 DSH 日志（专用跟踪窗口）
@@ -47,27 +55,35 @@ DSH (状态圆点: ●绿运行/●黄启动中/●红未启动)   ← 顶层第
    ●红=异常中断(非手动终止/错误/崩溃) ●浅=空/未收尾 ●透明=状态未知(DSH 未运行或插件未装)
 打开官方会话 chat
 ── 分隔 ──
-<状态圆点> <模型名> (<端口>)（每模型一条，二级菜单，2026-09-11 改造）
+<状态圆点> <模型名> (<端口>)   ← **叶子项，没有二级菜单**（2026-09-26 改造，§11.10）
    状态圆点：●黄=启动中 ●绿=运行中 ●橙=运行中(未托管，端口上有 llama 但托盘未接管) ●红=未运行
- ├─ 状态：…（禁用行；悬浮给全量：pid / 启动时刻 / 已运行时长 / 内存 / 模型 / 端口 / provider / 服务端实测）
- ├─ 启动 DSH 会话（官方 Web UI；先校准 settings.yaml 再打开，§4 同旧「打开 DSH 会话」逻辑）
- ├─ 启动内置对话（ThinChatForm 瘦客户端；同样先校准 settings.yaml）
- ├─ 启动模型 / 重启模型 / 停止模型  ← 这三项**点击后不收起菜单**（可连续操作、立即看到状态变化）
- ├─ 运行时配置（禁用）
- │   ├─   环境配置
- │   │     ├─ CUDA_VISIBLE_DEVICES = …（-ts 多卡时=选中的 GPU 列表；CPU/单卡时=未设置）
- │   │     └─ GGML_CUDA_ALLREDUCE = internal（多卡张量并行时；否则未设置）
- │   └─   llama.cpp 配置（悬浮=完整命令行）
- │         模型 = … · 无 mmproj / mmproj = …
- │         GPU0+1 · -ngl 99 · --split-mode tensor -ts 50,50
- │         上下文 = 192K · KV = … · 批 = B/UB · 缓存内存 = …
- │         MTP = … · 参数组 = … · flash-attn = …
- │         监听 = 0.0.0.0:8081 · reasoning = deepseek · jinja
- │         实测 = ctx …(服务端 /props) · 视觉 …（未运行时提示「启动后自动探测」）
+   **点本项 = 选中该模型**（一级菜单内互斥单选；选择写进 dsh-tray.cfg 的 selectedModel=，下次启动托盘仍是它）
+   ⇒ 下面「当前模型」那一组 + 全部参数面板都跟随它；本行因此是**①类**（点完不收起，好接着调参数）
+── 分隔 ──
+当前模型：<名> (<端口>) · 本模型覆盖 N 项（禁用标题；N>0 = 该模型在 dsh-tray-config.json 里单有几项参数）
+状态：…（禁用行；悬浮给全量：pid / 启动时刻 / 已运行时长 / 内存 / 端口 / 服务端实测）
+启动模型 / 重启模型 / 停止模型   ← 作用于**上面选中的那个**模型；三项**点击后不收起菜单**（②类）
+启动 DSH 会话（官方 Web UI；先校准 settings.yaml 再打开，§4 同旧「打开 DSH 会话」逻辑；
+              文案随「内置渲染」开关加「（内置渲染）」后缀）
+启动内置对话（ThinChatForm 瘦客户端；恒走内置渲染，不受开关影响）
+运行时配置（禁用；悬浮给 6 行明细 + 生效环境 + 完整命令行。**2026-09-26 语义终稿（用户三修正后）**：面板各下拉标题显示的就是选中模型的生效值 ⇒ 本行**不复述任何参数值**（差异值清单与标题同时可见=重复，用户圈注打回）；只报选项里看不出的信息：自定义启动命令（ArgsCustom）恒显示，其余整行隐藏；差几项的计数只在「当前模型」头部（值清单在其 ToolTip 按需看）。另修「显示慢一拍」：PersistParam 同步 Spec 后补 RefreshChecks（此前 setter 的刷新跑在同步前，面板显示的是上一次点击的值））
+ ├─   环境配置
+ │     ├─ CUDA_VISIBLE_DEVICES = …（-ts 多卡时=选中的 GPU 列表；CPU/单卡时=未设置）
+ │     └─ GGML_CUDA_ALLREDUCE = internal（多卡张量并行时；否则未设置）
+ └─   llama.cpp 配置（悬浮=完整命令行）
+       模型 = … · 无 mmproj / mmproj = …
+       GPU0+1 · -ngl 99 · --split-mode tensor -ts 50,50
+       上下文 = 192K · KV = … · 批 = B/UB · 缓存内存 = …
+       MTP = … · 参数组 = … · flash-attn = …
+       监听 = 0.0.0.0:8081 · reasoning = deepseek · jinja
+       实测 = ctx …(服务端 /props) · 视觉 …（未运行时提示「启动后自动探测」）
+内存与缓存（二级菜单：立即回收 / 就绪后自动回收一次 / 空闲自动回收（6 档间隔）/ 硬盘 KV 缓存开关 / 路径与状态行；§13）
 停止全部 | 重启全部（重启全部 = 逐个「重启模型」，同样重读配置、不碰 DSH）
 ── 分隔 ──
 推理参数组：<当前组>（单选，标题带当前值）
-GPU: <选择>（复选） | 上下文: <N>K（单选，标题带当前值） | KV 缓存：<当前>（单选） | 缓存内存：<当前>（单选；--cache-ram MiB；0=禁用/-1=无限制；cfg 键 cacheRam=） | 切分模式：<当前>（单选） | MTP: <档位>（单选；无/MTP/MTP2/MTP3/MTP4 → --spec-type draft-mtp --spec-draft-n-max N；重启对应服务后生效；cfg 键 mtpLevel=）
+GPU: <选择>（复选） | 上下文: <N>K（单选，标题带当前值） | KV 缓存：<当前>（单选） | 缓存内存：<当前>（单选；--cache-ram MiB；0=禁用/-1=无限制；cfg 键 cacheRam=） | 切分模式：<当前>（单选） | MTP: <档位>（单选；无/MTP/MTP2…MTP8 共 9 档（2026-09-26 6→9 档，用户令）→ --spec-type draft-mtp --spec-draft-n-max N；重启对应模型后生效；cfg 键 mtpLevel=）
+⚠️ 上面这一整排（含 MTP）改的是**当前选中模型的持久化配置**（写回 dsh-tray-config.json 的服务项），
+   不再是"启动时覆盖所有模型"；托盘全局默认（dsh-tray.cfg）退居"未覆盖模型用的基线"。解析规则见 §11.10。
 模型监听 0.0.0.0（局域网可访问）（复选；勾选=--host 0.0.0.0 默认，取消=--host 127.0.0.1 仅本机；下次启动生效；cfg 键 bind=）
 ── 分隔 ──
 查看日志（服务日志窗口） | 打开配置文件
@@ -125,7 +141,7 @@ Start-Process -FilePath .\publish\DSHTray.exe -WorkingDirectory .\publish
   想把模型一起停掉才用 `--exit --stopall`（桌面 `dsh-tray-exit-stop-model.cmd`）。
   ⚠️ 版本 ≥ 2026-09-10b 且 < 2026-09-11 的构建里，`--exit` 旧语义是**停模型**，那时保留模型要 `--exit --nostop`
   （该别名现在仍被接受，但已等价默认）；再旧的版本没有这个开关，只能 `Stop-Process -Force`。
-- 本机验证出口：--dump-menu（结构）、--selftest-svcmenu（每模型二级菜单：状态映射矩阵 + 运行时配置渲染 + 一级旧入口残留检查，§11.8）、--selftest-logwin（DSH 日志窗口）、--selftest-lock（孤儿写锁判定，§11.6）、--selftest-exit（退出信号监听者探测，§11.7）、--selftest-uithread（UI 调度锚点「排队语义」断言）、--selftest-logsink（有界日志缓冲）、单实例双启=1 进程。
+- 本机验证出口：--dump-menu（结构）、--selftest-svcmenu（一级模型行 +「当前模型」组：状态映射矩阵 + 运行时配置渲染 + 一级旧入口残留 + 叶子项判定，§11.10）、--selftest-logwin（DSH 日志窗口）、--selftest-lock（孤儿写锁判定，§11.6）、--selftest-exit（退出信号监听者探测，§11.7）、--selftest-uithread（UI 调度锚点「排队语义」断言）、--selftest-logsink（有界日志缓冲）、单实例双启=1 进程。
 
 **上线脚本 `apply-dsh-tray.cmd`（桌面）现在用优雅退出而非强杀**（2026-09-11）：先 `publish\DSHTray.exe --exit --nostop`（`--nostop` 在新旧构建里都表示「保留模型」→ 跨版本安全）等它自己退，最多等 12s，超时才 `taskkill /F` 兜底。好处：走 `ExitApp` → 图标正常注销（不留死图标槽）、模型完全不被碰。
 
@@ -227,7 +243,8 @@ WinForms 下拉显示是模态且状态敏感——显示期间对 DropDownItems
 - `--selftest-rpc`：DshAuth+DshRpc 打真实 3080 `session/list` → `selftest-rpc.txt`（`RPC OK session/list items=N`）。
 - `--selftest-lock`：检查/清除孤儿启动写锁 → `selftest-lock.txt`（before/action/after/result 四行，见 §11.6）。
 - `--selftest-exit`：探测两条退出信号是否都有监听者 → `selftest-exit.txt`（`keep` / `stopall` 两行 + `listener=YES/NO`，见 §11.7）。
-- `--selftest-svcmenu`：每模型二级菜单自检 → `selftest-svcmenu.txt`（状态映射矩阵 / 真实端口探测 / 每服务渲染 / 一级旧入口残留，见 §11.8）。
+- `--selftest-svcmenu`：一级模型行 +「当前模型」组自检 → `selftest-svcmenu.txt`（状态映射矩阵 / 真实端口探测 / 逐个选中的组渲染 / 一级旧入口残留 `OLD-TOPLEVEL-ENTRIES` / 叶子项 `SVC-MENU-LEAF-ITEMS`，见 §11.10）。
+- `--selftest-menukeep`：菜单「点了关不关」裁决器自检 → `selftest-menukeep.txt`（纯函数三态 `ShouldCancel`/`ShouldCancelFocusChange`/`ShouldCloseOnClick` + 真实菜单树逐项 `IsState` 分类（含负向：③类项必须为 false）+ 挂载计数 + `Hook` 幂等（连调两次订阅数不增长）+ 一级模型行=叶子项契约（A12）+ 隔离菜单 `PerformClick` 行为对照 + ⑤ 一级项接线（接线数 / 判据与「启动模型」项 `Enabled` 同源 / 判据穷举含 3 条负向 / DSH 一级项仍③类 / 模型一级项①类 / 隔离菜单行为：`canStart=true` 触发恰好 1 次、闸门拦第二次、`canStart=false` 不触发，见 §11.9）。⚠️ 本探针跑在 CLI 进程里，**证不了真鼠标路径**（`PerformClick` 的 `Closing` 顺序与真左键相反）⇒ 真鼠标结论只能在常驻真托盘进程里取得；判据与实测时序见纪律 skill `~/.workbuddy/skills/tray-menu-keepopen` §二）。
 - `--selftest-uithread`：UI 线程调度自检 → `selftest-uithread.txt`（**实例**探针 —— 需要一个"已创建但未 Show"的 `LogForm`，那正是 P0-1 的触发场景；判别力核心 = "消息泵未跑时，后台线程发起的 UI 更新**必须还没生效**"；另含 RichTextBox 上限裁剪。改造记录见 `docs/2026-09-11-architecture-governance.md` §9）。
 - `--selftest-logsink`：日志缓冲自检 → `selftest-logsink.txt`（纯数据层，不建 TrayApp、不占单实例锁：8 线程 × 2 万行并发写 / `Length` 守恒 / 窗口有界 / 旧游标夹取 / 单行超上限仍保留 / `Clear` 不重置游标）。
   首行是 ASCII 锚点 `SVC MENU PROBE (...)`、并输出 `OLD-TOPLEVEL-ENTRIES = 0` —— 供 `apply-dsh-tray.cmd` 判定「源构建确实是新版」。
@@ -301,9 +318,13 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
   ```
 - 例外：诊断开关和 `--exit` 都在**单实例锁之前**返回，天然可安全重复调用；`--exit [--stopall] --selftest-exit` 组合时**诊断优先**（只探测不发信号，实测未写 `exit-signal.txt`）。
 
-### 11.8 每模型二级菜单 + 「重启模型」不中断会话（2026-09-11）
+### 11.8 每模型二级菜单（**2026-09-26 已取消**，见 §11.10）+ 「重启模型」不中断会话（2026-09-11）
 
-**一级项 = `<状态圆点> <模型名> (<端口>)`**（原一级的「启动 <模型> (端口)」与「打开 DSH 会话（<模型>）」合并进来，一级不再单列每模型入口 —— 用 `--selftest-svcmenu` 的 `OLD-TOPLEVEL-ENTRIES = 0` 判定）。
+> ⚠️ **本节描述的是 09-26 之前的形制**。那次改造把每模型的二级菜单**整体移除**（功能上移到一级菜单的
+> 「当前模型」组），下面这段保留作历史依据（状态语义 / 重启不中断会话 / `MenuKeepOpen` 三件套都仍然成立），
+> 但「每模型一条二级菜单」这个形态**已不存在**，判据见 §11.10。
+
+**原一级项 = `<状态圆点> <模型名> (<端口>)`**（原一级的「启动 <模型> (端口)」与「打开 DSH 会话（<模型>）」合并进来，一级不再单列每模型入口 —— 用 `--selftest-svcmenu` 的 `OLD-TOPLEVEL-ENTRIES = 0` 判定）。
 
 **状态语义**（`Service.Start / PortBusy` + `SvcState/SvcDot/SvcEnable` 三个纯函数，便于枚举验证）：
 
@@ -320,8 +341,14 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
   - `ReloadSvcConfig` **只读解析** `dsh-tray-config.json`（**绝不调用 `Config.Load()`** —— 它在文件缺失/无服务项时会**把默认配置写回文件**，会抹掉用户真实配置；`dsh-tray-config.json` 不在 git、不会自动重建）。按 `Name` 匹配、回退 `Port`，把 `Model/Port/UseMmproj/Mmproj/Batch/Ubatch/SpecDecode/Provider` 的差异逐条打进日志；同时 `LoadCfg()` 重读 `dsh-tray.cfg`（ctx/KV/切分/MTP/GPU/缓存内存/监听…）并 `RefreshChecks()`。
   - **不碰 DSH(3080)** → dsh 会话（对话历史）不中断，仅"正在生成的那一轮"需重发。**端口不变时 dsh 侧无需改配置**；改了端口请点一次「启动 DSH 会话」重新校准 provider baseURL（§4）。
   - `Stop` 兜底：`proc` 为空但端口有 llama → `KillByPort`（netstat → LISTENING pid → **进程名含 llama 才杀**），否则菜单会出现「端口被占却停不掉」的死角。
-- 「启动/重启/停止」三项**点击后不收起菜单**：`KeepOpenOnClick(dd, items)` 用 `Click` 先于 `Closing` 的顺序记标志位，再在 `Closing` 里 `e.Cancel`（只对这三项；会话入口照常收起）。不要用整段 `KeepOpen(dd)`（那会让会话入口也点不关）。
-- 子菜单**元素固定**（20 项：1 状态 + 1 分隔 + 2 会话 + 1 分隔 + 3 启停 + 1 分隔 + 1 标题 + 1 环境标题 + 2 环境项 + 1 llama 标题 + 6 配置行），运行期只改 `Text/Image/ToolTipText`，**绝不增删 `DropDownItems`**（菜单显示期间改结构会静默破坏弹出，§9）。
+- 「启动/重启/停止」三项**点击后不收起菜单**：统一走 `MenuKeepOpen`（`MenuKeepOpen.cs`）。
+  - 🔴 **实测时序（与直觉相反）：`Closing` 早于 `Click`** —— 点一个项的序列是 `Closing(ItemClicked) → Click`；真鼠标路径下根菜单 `Closing(AppFocusChange)` 还**先于**子菜单 `Closing(ItemClicked)`。所以"在 `Click`/`CheckedChanged` 里记标志位、再到 `Closing` 里查"**根本走不通**（旧 `KeepOpenOnClick` 就是这么写的，一次也拦不下来，本轮已删）。
+  - 正解 = **先拦后判三件套**：① `Closing` 遇 `ItemClicked` 一律先 `e.Cancel = true`；② `AppFocusChange` 只在"500ms 内真按过本菜单项"（`MouseDown` 早于两次 `Closing` 留下的印记）时才拦，否则菜单会变钉子；③ 被拦下的③类项由我们 `BeginInvoke` **延后**补关（**绝不**同步 `Close()`，否则 `Closed → Rebuild → Dispose 正在处理点击的项` = 抽地板 → 原生崩溃）。
+  - 纪律**唯一源**：`~/.workbuddy/skills/tray-menu-keepopen`（改这类菜单前**先读它**，不要照抄某个托盘的写法 —— 模板不是参考系，语义才是）。
+  - 落地：这三项（连同**「当前模型」组的 start/restart/stop**、每模型一级项、`重启全部`、DSH 启停、各勾选项）由 `TrayApp` 构造末尾的 `_keep.DeclareStateItems(_keepItems)` 声明为①②类（**不用 `Tag`** 作判据载体）；8 个参数面板下拉走 `_keep.DeclareWholeState(...)`；其余③类项**不声明** ⇒ fail-safe 自动补关。**未声明的项最坏只会"点了关"（原缺陷），绝不会变成关不掉的钉子。**
+    ⚠️ 计数契约随之改口径（09-26）：`StateItemCount == 12 + svcMenus.Count`（全局 9 「当前模型」组 3，加每个一级模型行 1）、`AttachedDropdowns == 10`（不再 +svcMenus.Count）。
+- ~~子菜单**元素固定**（20 项：…）~~ → 二级菜单已于 09-26 取消，**这条纪律的落点变成「「当前模型」组的那 9 条（3 启停 + 2 会话 + 1 标题 + 1 状态 + 1 配置行）**：运行期只改 `Text/Image/ToolTipText/Enabled`，**绝不增删 `DropDownItems`**（菜单显示期间改结构会静默破坏弹出，§9）。
+  09-26 补一条**叶子项契约**：一级模型行的 `DropDownItems.Count` 必须恒为 0（即"不许长出二级菜单"）—— 这与旧"20 项"是同一个防线的两种写法，新的那个不会因为新增项而误报。
 - ⚠️ `ToolStripItem.Visible` 的 getter 在**父下拉从未显示过**时恒为 false —— 自检输出不要用 `it.Visible` 判空（原探针因此漏印 6 行配置），按原始文本打印。
 - ⚠️ 悬浮提示：`ContextMenuStrip.ShowItemToolTips` 需显式置 true（托盘已置）。
 - 自检 `--selftest-svcmenu` → `selftest-svcmenu.txt`：
@@ -329,9 +356,52 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
   SVC MENU PROBE (ascii-anchor; svcmenus=3)          ← ASCII 锚点，供 .cmd 判定新版
   === 状态映射矩阵 ===                                 四种 starting/running/busy 组合 → 圆点/状态文本/启停可用
   === 真实端口探测（只读：Adopt + /health + /props）===   逐服务 health/是否接管/实测 ctx/视觉
-  === 每服务二级菜单（真实配置渲染）===
+  === 一级模型行 + 「当前模型」组（真实配置渲染，逐个选中模型打一遍）===
   === 一级菜单是否残留每模型旧入口 ===  OLD-TOPLEVEL-ENTRIES = 0  (OK)
+  === 一级模型行是否为叶子项 ===         SVC-MENU-LEAF-ITEMS = 3 (OK)
   ```
+
+### 11.9 一级项快捷启动（2026-09-12）
+- **交互**：一级项（`DSH` / 每个 `<模型名> (端口)`）在**未启动**时，直接点它 = 快捷启动，不必展开子菜单到「启动 DSH」「启动模型」。已启动/启动中/端口被外部占用 ⇒ 只走原行为（展开子菜单）。
+  动机是**交互成本**：一级项位置固定、抬手就到，而「启动…」藏在子菜单里 —— 省的是"视觉搜索 + 瞄准"（悬停本来就会展开子菜单，点击次数并没变）。
+- **叠加式**：**不改变任何菜单展开/关闭语义** —— 子菜单照常弹出、菜单该关还关。所以一级项**仍是③类**（`_keepItems` 里没有它们），`MenuKeepOpen` 的判据一个都没动。
+- **判据铁律（必须与用户所见一致）**：只有**子菜单里那个「启动…」项当前可点**时才触发 —— 模型 = `SvcStatus.Enable(starting,running,busy).start`（与 `m.start.Enabled` 同源），DSH = `dshState==0`（与 `dshStartItem.Enabled` 同源）。⇒ 圆点红 / 项可点 / 点一级项会启动，**三者同真同假**。
+  ⚠️ 判据只能读**缓存的运行时状态**（Tick 后台探针刷新的），**绝不能**在点菜单时现探端口：`SvcProbe.PortUp` / `DshUp` 都是同步 HTTP/TCP，会当场冻住 UI。
+- **幂等**：`Click` 与 `MouseUp` 两路都挂（父项点它到底触发不触发 `Click`，程序化实测**会触发**——见 `MenuKeepOpen` 那条注释），共用一个 **1500ms 闸门** ⇒ 一次点击最多放行一次，连点不会重复拉起进程。`start` 侧还有二层守卫（`Start(svc)` 拒"已运行/端口被占"、`DshStart()` 拒"3080 已在听"）。
+- **回执**：**气泡（主回执）** + 日志 `[快捷启动] …`。⚠️ 别把"子菜单里的状态行"当成必然回执 —— 一级项是③类，`Click` 触发时裁决器会补关菜单（程序化实测如此）⇒ 菜单可能已经关了；「状态：启动中 · 约 30-60s」是**下次打开菜单**才可见。
+- 实现：`TrayApp.QuickStart.cs`（`WireQuickStart`）；接线点 **只有** `TrayApp.cs:143`（DSH）——
+  ⚠️ 2026-09-26 起**模型的一级项不再接快捷启动**（语义改成"点=选中"，§11.10），接线数期望由 `1+svcMenus.Count` 降为 `1`。
+  可发现性提示：DSH 在 `dshMenu.ToolTipText`。
+- 自检：`--selftest-menukeep` 的 **⑤ 节** —— 接线数、判据同源、判据穷举（4 条含 3 条负向）、DSH 一级项仍③类、隔离菜单行为（`canStart=true` 触发恰好 1 次 / 闸门拦第二次 / `canStart=false` 不触发）。
+  ⚠️ **别用反射读项的事件订阅数**：WinForms 的 `ToolStripItem` 事件走 `EventHandlerList(Events)`，**没有同名 backing field**（那样写恒得 0，是读法错，不是没挂）。
+
+### 11.10 一级模型行 = 选中 + 「当前模型」组 + 参数跟随（2026-09-26）
+
+用户指令原文要点：MTP 可选项 4 → 6；一级菜单的模型名**从"点击启动"改为"点击选中（互斥）"，默认上一个选中的模型**；
+下方模型启动配置**跟随当前选中模型**，语义从「启动时覆盖」改为「**修改对应模型配置的持久化配置**」；
+**取消模型选项的二级菜单**，所需功能**上移一级菜单**。
+
+- **选中态**：`selSvc` 是唯一事实源。一级模型行点击 → `SelectSvc()`（①类：点完不收起菜单，好接着调参数）；
+  启动时 `SelectInitial()` 按 `dsh-tray.cfg` 的 `selectedModel=` 复原，解析不出则回落**配置里的第一个模型**
+  ⇒ 保证 `selSvc` 永不为 null，下游不必判空。
+  ⚠️ 为什么选中态**不写** `dsh-tray-config.json` —— 那是服务清单（会被增删改名/改端口），往里塞"上次选中谁"
+  会让清单语义 polluted；`selectedModel=` 是托盘自身的偏好，落 `dsh-tray.cfg` 才对。
+- **参数语义（本次的核心变更）**：9 项参数（ctx / KV / 缓存内存 / 切分 / GPU1 占比 / MTP / 参数组 / 监听 / GPU 选择）
+  在 `ServiceConfig` 上新增**同名可空**字段（注意是 `int?`/`bool?` 而不是 `0` —— `0` 是合法值：缓存内存=禁用、ctx=8K）。
+  - 合成规则收在**纯函数** `SvcParams.Resolve(spec, 全局默认…)`：本模型覆盖优先，**逐项**回落全局默认
+    （不是整组覆盖：给 8082 改 KV 不该牵连它的上下文）。覆盖项逐个计数进 `Overrides`，菜单据此显示"本模型覆盖 N 项"。
+  - 写回链路 `PersistParam(apply,label)`：改一个参数 → 立刻 `Config.Save(cfg)` 写 `dsh-tray-config.json`
+    对应服务项 → 日志写明"已存到模型 X 的配置；重启该模型生效"。**传的是 `cfg` 本体不是重建的默认配置**
+    （`Config.Save` 是整份覆盖写，传错会抹掉手工配置）。
+  - 全局默认（`dsh-tray.cfg`）**没有删**，退居"未覆盖模型用的基线"，保住"多个模型共用一个基线"这条既有行为。
+- **四处同源**：启动(`Start`) / 状态行(`ToView`) / 「运行时配置」行(`RefreshCurGroup`) / 启动日志，全部读同一个
+  `SvcParams.Resolve` 结果 —— 否则会出现"菜单写着 192K、实际按 128K 起"（执行鸿沟）。
+- **无二级菜单的代价**：会话入口与启停都变成"作用于当前选中模型"，所以组里每条**文案/后缀/tooltip 必须能预测行为**
+  （唯一源仍是 Core 的 `SessionEntryLabels`）：「启动 DSH 会话」随内置渲染开关加「（内置渲染）」后缀，
+  「启动内置对话」恒走内置渲染、不受开关影响（`OpenBuiltinText()`）。
+- **契约红线（自检会判，改动必须同步）**：`--selftest-menukeep`（A10 `AttachedDropdowns==10` / A11 `StateItemCount==12+svcMenus.Count` /
+  A12 一级模型行=叶子项 `DropDownItems.Count==0` / ⑤ 接线数==1）、`--selftest-svcmenu`（`SVC-MENU-LEAF-ITEMS`）、
+  `--selftest-tips`（D1a 全树下拉数==10）、`SvcParamsTests`（覆盖/回落/0 值/往返）。
 
 ## 12. 源文件结构（2026-09-11 S1 按类型拆分 → 09-12 S3 分工程 → S4 加测试）
 
@@ -347,12 +417,13 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
 | `src/QwenTray.Core/SvcLines.cs`〔Core〕 | **菜单文本合成**（S5-3 抽出） | 4 个档位标签（`KvLabel`/`CacheRamLabel`/`MtpLabel`/`ParamLabel`，越界回落到最保真档）、`Mid`（宽度截断，**必须恰好 `max` 字符**）、`Dur`、`CfgLines`（「运行时配置」**恒 6 行** —— 菜单按这个数建行池）、`StatusTip`。输入是 `SvcView`，由 `TrayApp.ToView(Service)` 拍快照（**`Service` 与 Core 之间唯一的收口点**）。⚠️ 已知可见缺陷：多卡行渲染成 `GPU0+1`（`Join("+")` on `List<int>`），与 `GpuSelection.ShortLabel()` 的 `GPU0+GPU1` 不一致 —— **未修**，断言钉住现状 |
 | `src/QwenTray.Core/SvcConfigDiff.cs`〔Core〕 | **重读配置的判定内核**（S5-4 抽出） | `Find`（Name 忽略大小写 → 退同 Port）+ `Apply`（就地写穿 `ServiceSpec` + 返回人可读差异列表）。**三条守卫**：`Batch`/`Ubatch` 只在 `>0` 时覆盖、`Provider` 只在非空时覆盖、`Mmproj` 是双条件 —— 它们决定"用户手改配置能否生效 / 会不会把内存里的值抹掉" |
 | `TrayApp.cs` | 托盘骨架（partial 1/5） | 全部字段声明、`TrayApp()` 构造函数（建菜单/图标/`clock`）、`dsh-tray.cfg` 读写（`Cfg`/`LoadCfg`/`SaveCfg`/`SaveAllPos`）、`RefreshChecks`、显存分摊提示。4 个档位标签留**迁移期兼容层**转发到 `SvcLines`（与 `Service` 那 10 个转发属性同一惯例） |
-| `TrayApp.Services.cs` | 模型服务（partial 2/5） | `BuildSvcMenu`/`RefreshSvcMenu`（每模型二级菜单的 **WinForms 装配**）、`ToView(Service)`（拍 `SvcView`）、`Start`/`Stop`/`StopAll`/`RestartSvc`/`ReloadSvcConfig`（进程编排面）。探活/状态映射/文本合成/配置差异判定**均已移出**，见上三行 |
+| `TrayApp.Services.cs` | 模型服务（partial 2/5，2026-09-26 改造） | `BuildSvcMenu`（一级模型行=叶子项，点击=选中）/ `SelectSvc` / `RefreshCurGroup`（「当前模型」组渲染）/`ToView(Service)`（拍 `SvcView`）、`Start`/`Stop`/`StopAll`/`RestartSvc`/`ReloadSvcConfig`（进程编排面）。探活/状态映射/文本合成/配置差异判定**均已移出**，见上三行 |
 | `TrayApp.Dsh.cs` | DSH 与日志（partial 3/5） | `DshUp`/`DshStart`/`DshStop`/`DshRestart`、`ScrubWorkBuddyEnv`/`StripWorkBuddyShim`（崩溃链 A 修复）、`TailLog`/`ClearDshLogFiles`/`OpenDshLog`、`Bg`/`Ui`/`ReportEx`（S0 调度器入口） |
 | `TrayApp.Sessions.cs` | 会话与弹窗（partial 4/5） | `UiThreadProbe`（S0 自检）、dsh 配置 YAML 读写（`ExtractBlock`/`ReplaceBlock`/`EnsureLlamaProvider`）、`OpenPop`/`OpenThin`/`OpenOfficial`、插件管理入口、最近会话（`ReadRecent`/`RebuildRecentMenu`/`DotFor`） |
 | `TrayApp.Lifecycle.cs` | 生命周期与自检（partial 5/5） | `Adopt`（接管外部 llama）、`Tick`（1s 节拍）、`ExitApp`/`ExitFromSignal`/`RestartTray`、全部 `*Probe()` 自检入口 |
 | `LogForm.cs` | 统一日志窗口 | 单窗口双页签 + 工具栏 + 时间戳规则（`Append`/`AppendDsh`/`AppendDshStamp`/`Trim`） |
-| `SvcMenu.cs` | 每模型二级菜单的数据壳 | 纯字段容器（原 `TrayApp` 私有嵌套类 → 顶层 `internal`） |
+| `SvcMenu.cs` | 每模型一级行的容器（2026-09-26） | 只留 `svc` / `root` / `sig`；其余 11 个字段是二级菜单时代的遗留，注释标明未装配（形态若复活可直接接回） |
+| `src/QwenTray.Core/SvcParams.cs` | 参数解析（2026-09-26 新增） | 纯函数 `Resolve`：`本模型覆盖优先 + 逐项回落全局默认`，四处消费点同源 |
 | `UiDispatcher.cs` / `SelfTests.cs` | S0 基础设施（留在主工程） | UI marshal 锚点 / 自检实现 |
 | `src/QwenTray.Core/LogSink.cs`〔Core〕 | **有界日志缓冲**（S0 起就是独立类型，S5 进 Core） | 三写一读线程安全、`Length` 单调可当游标、超上限丢**最早**且**至少留一行**、`Read` 对滑出窗口的游标**夹取而不抛**、`Clear` 不重置 `Length`（9 个单测逐条钉住） |
 | `src/QwenTray.Core/Perf*.cs`（5 个）〔Core〕 | 性能**数据层** | `PerfFingerprint`(指纹) → `LlamaLogParser`(stdout 解析) → `PerfModel`(数据模型) → `PerfStore`(存储+闸门) → `PerfSampler`/`PerfRuntime` |
@@ -363,6 +434,9 @@ Error: atomic-write: timed out waiting for the writer lock at C:\Users\<u>\.dsh\
 | `ThinChatForm.cs` / `PluginCenter.cs` / `PluginManagerForm.cs` | 内置渲染 / 插件中心 / 插件管理弹窗 | |
 | `src/QwenTray.Core/DshAuth.cs` / `DshRpc.cs` / `HwInfo.cs` / `SysInfo.cs` / `GpuInfo.cs` / `BenchRunner.cs`〔Core〕 | 无 UI 依赖的工具类 | S3 已收纳（Core 编译期不许引用 `System.Windows.Forms`） |
 | `AutoStart.cs` | 开机自启（留在主工程） | 真用 `Application.ExecutablePath` ⇒ **不能进 Core**；按目标架构它归 `Integr.` 而非 `Core`（报告 §12.1） |
+| `src/QwenTray.Core/MemTrim.cs`〔Core〕 | **内存回收判定内核**（2026-09-13 新增） | `TrimKind`（Manual/OnReady/Idle）、`AllowIdle/AllowOnReady/Allow`、`ClampInterval`/`IntervalLabel`/`ResultLine`/`Bytes`/`PolicyText`。**纯函数、无 UI 依赖**；唯一硬规则 `anyProcessing ⇒ false`（单测钉住） |
+| `src/QwenTray.Core/WinMem.cs`〔Core〕 | **工作集回收 P/Invoke**（2026-09-13 新增） | `OpenProcess(QUERY_INFORMATION\|SET_QUOTA)` + `EmptyWorkingSet` + `CloseHandle`；`WorkingSetBytes`/`TrimWorkingSet`/`PidByPort`（netstat）。⚠️ **刻意不用 `Process.Handle`**（Adopt 的外部实例权限不全 ⇒ 静默失败） |
+| `src/QwenTray.Core/MemTrimCli.cs`〔Core〕 | `--trim [port]` 脚本入口（2026-09-13 新增） | **不建 `TrayApp`**，逐服务回收并打印 `RESULT OK/NOOP`；写 `selftest-trim.txt` |
 
 **回滚（S1 结构拆分）**：`Program.cs.bak-s1` / `ModelPerf.cs.bak-s1` 是这两个文件的前身（`.cs.bak-*` 后缀不被 SDK 编译）；回滚 = 删掉 20 个新文件 + 把这两个改名回去。
 
@@ -375,8 +449,8 @@ dsh-chat-popup/
 │     └─ ProjectReference ──┐
 ├─ src/QwenTray.Core/       │
 │  ├─ QwenTray.Core.csproj ─┘  ← QwenTray.Core.dll（UseWindowsForms=false）
-│  └─ *.cs（21 个：Config / ServiceSpec / Cli / LaunchArgs / LogSink / SvcStatus / SvcLines / SvcConfigDiff / NodeLocator / Perf 数据层 / DshAuth / DshRpc / 硬件采集）
-└─ tests/QwenTray.Tests/       ← 193 个单测（xunit 2.5.3 + coverlet，UseWindowsForms=false）
+│  └─ *.cs（24 个：Config / ServiceSpec / Cli / LaunchArgs / LogSink / SvcStatus / SvcLines / SvcConfigDiff / NodeLocator / Perf 数据层 / MemTrim / WinMem / MemTrimCli / SessionEntryLabels / DshAuth / DshRpc / 硬件采集）
+└─ tests/QwenTray.Tests/       ← 247 个单测（xunit 2.5.3 + coverlet，UseWindowsForms=false）
    ├─ QwenTray.Tests.csproj
    └─ *Tests.cs（CliOptions / LlamaLogParser / PerfFingerprint / Config / LaunchArgs / LogSink / NodeLocator / SvcStatus / SvcLines / SvcConfigDiff）
 ```
@@ -418,3 +492,36 @@ python docs/temp/gov/s4_coverage.py
 **S5 收口说明（2026-09-12 下午）**：S5 里**能自动验证的部分已全部交完**。原定"把 `MenuBuilders` / `ServiceManager` 搬成**独立类型**"那两块**判定不做** —— 按 §11.3 判据（拆分要看它**解锁了什么下游动作**）它们解锁 0 自动验证，而要动 `TrayApp` 的 ~50 个菜单字段 / 5 个 partial 约 50 处调用点（含 `TrayApp.Dsh.cs::RefreshDshUi`），风险最高且验收只能靠真人过报告 §7 的**托盘行为回归清单 10 项**。真要做得单独开一次带人工回归窗口的任务。`Service` 的 10 个转发属性同理留着（删它们就是 S5-4 的删除清单，编译器逐处报错指路）。
 
 **S3 的改造验收（同机同配置差分法）**：改造前后各跑一遍 `--selftest-*` 全套 + `--dump-menu`，逐字节比对 ⇒ 实质内容一致；`FP-REAL-8081 = PASS (966d1620a3)`；真实 `--bench 8081` 打印 `已记入台账 cfg=966d1620a3`，台账 17 条不新增。基线留档 `~/.workbuddy/_backup/20260912_s3_baseline/`。
+
+## 13. 内存回收（三路径）与三级 KV 缓存（2026-09-13 新增）
+
+### 13.1 内存回收 —— 托盘菜单「内存与缓存」
+
+| 路径 | 触发 | 默认 | CLI |
+|---|---|---|---|
+| 手动 | 菜单「立即回收运行中模型内存」 | 随时可用 | `DSHTray.exe --trim [port]`（**不开托盘也能用**） |
+| 就绪后一次 | 服务 `/health` ok 那一拍打标 `pendingTrimOnReady`，下一 tick 消费 | **开** | — |
+| 空闲自动 | 每 30 s 评估一次 | **开**，间隔 **30 分钟**（6 档：5/15/30/60/120 分钟 + 仅手动） | — |
+
+- **判定内核在 Core**：`MemTrim.cs`（纯函数）+ `WinMem.cs`（P/Invoke）+ `MemTrimCli.cs`（`--trim` 入口）。托盘侧只有 `ToggleTrim*` / `TrimOne` / `TrimAll` / `AppendTrimLog` / `TrimTick`（每 30s，`_trimBusy` 互斥，重活丢 `Bg`）。
+- 🔑 **硬规则：`anyProcessing == true ⇒ 一律不回收`**（推理中回收 = 缺页抖动）。`SvcProbe.Busy(port)` 探不到 `/slots` 时**返回 true（当"忙"）**——保守优先，绝不误伤推理。单测 `Idle_ProcessingInFlight_NeverAllows` 钉住。
+- ⚠️ `WinMem` **刻意不用 `Process.Handle`**：`Adopt()` 接管的外部实例句柄权限不全，用它调 `EmptyWorkingSet` 会**静默失败**（不抛异常、也不回收）。一律自己 `OpenProcess(PROCESS_QUERY_INFORMATION|PROCESS_SET_QUOTA)` + `CloseHandle`，回收后 `Thread.Sleep(120)` 等内核摘页。
+- **只推工作集**：不改提交量、不释放显存。与 KV 缓存**正交**，可叠加。
+- 台账 `E:\kv_cache\mem-trim.ndjson`（每回收一行 ndjson）。间隔经 `ClampInterval` 夹取（`[60, 86400]`），cfg 里的非法值绕不过去；`仅手动` = 86400 档。
+- 自检：`--selftest-memtrim [live]` → `selftest-memtrim.txt`（20 项；不加 `live` 只验策略矩阵 + 菜单接线 + 台账可写，**不真回收**）。
+
+### 13.2 三级 KV 缓存（对标 DeepSeek 落盘）
+
+| 层 | 载体 | 开关 | 谁管 |
+|---|---|---|---|
+| L1 显存 | llama.cpp KV cache | `-c` / `--cache-type-k\|v` | 自动 |
+| L2 内存 | host 前缀缓存（context checkpoints） | `--cache-ram <MiB>` | 自动（LRU） |
+| L3 硬盘 | slot 快照 | `--slot-save-path DIR`（托盘默认 `E:\kv_cache\slots`，菜单「硬盘 KV 缓存」可关）+ `POST /slots/{id}?action=save\|restore` | ⚠️ **上游只给机制、不给策略** ⇒ 外部驱动 |
+
+- **上游为什么不够**：FR #17107「auto-persist slot」被官方关闭为 *not planned*。策略层落在 `E:\kv_cache\kvctl.py`（`status/ls/save/restore/drop/prune/watch/warmup/selftest`）+ `cache-policy.json`（配额 / LRU / 必须绑模型指纹 / **只有完整匹配才算命中**）。复刻依据 = DeepSeek-V4 §3.6.2 *On-Disk KV Cache Storage* + LMCache（arXiv 2510.09665）。
+- ⚠️ **501 不是 404**：没带 `--slot-save-path` 时端点回 **501 `not_supported_error`**；带了就 **200 可用**。判据 = `curl -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:<port>/slots/0?action=save" -d '{"filename":"probe.bin"}'`，**别用「目录空」推断不可用**。
+- ⚠️ **`n_saved:0` 的两个真因**：① `--cache-idle-slots` 默认开会清空空闲槽；② **请求不落 slot 0**（实测落 slot 3）⇒ 先 `GET /slots` 选 **`n_prompt_tokens` 最大**者，restore 优先找空闲槽。
+- **诚实边界**：`/slots` 空闲时只给 `id/is_processing/n_ctx/speculative`，跑过任务后才多 `n_prompt_tokens*`，**没有 prompt、没有 token id 序列** ⇒ 键只能是近似（`sha256(模型指纹|token数|提示)[:16]`）⇒ **不做逐请求自动命中**，只做自动落盘；真命中需 Phase-2 外部代理（当前不做）。
+- **体积模型**：`2 × n_layer × n_head_kv × head_dim × bytes_per_elem`（q8_0 ≈ 1.0625 B/elem）。27B 实测 **146,911 B/token**（≈143.5 KiB）；4B 78,352；9B 96,357。⇒ 16 GiB 单条上限 ≈ 114K token。
+- 真机实测（2026-09-13 03:1x，部署后的 CLI 打线上 27B）：`--trim 8082` ⇒ **18.50 GiB → 1.1 MiB**（PID 75636），随后 `--bench 8082 256 32 2` ⇒ **pp 414 / tg 39.3 t/s，推理不降速**。
+- 改 `--slot-save-path` / `cacheRam` 都是**重启服务才生效**，且会换配置指纹（性能台账按 `cfgId` 分桶会分裂）。

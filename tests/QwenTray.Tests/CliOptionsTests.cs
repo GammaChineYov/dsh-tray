@@ -12,7 +12,8 @@ public class CliOptionsTests {
   public static TheoryData<string> DiagnosticFlags() => new() {
     "--selftest-logwin", "--selftest-menushow", "--selftest-plugins", "--selftest-rpc",
     "--selftest-lock", "--selftest-exit", "--selftest-svcmenu", "--selftest-perf",
-    "--selftest-logsink", "--selftest-uithread",
+    "--selftest-logsink", "--selftest-uithread", "--selftest-menukeep", "--selftest-tips",
+    "--selftest-memtrim", "--selftest-warmup",
   };
 
   [Theory] [MemberData(nameof(DiagnosticFlags))]
@@ -102,5 +103,71 @@ public class CliOptionsTests {
 
   [Fact] public void Bench_WithoutPort_IsNotBench() {
     Assert.False(CliOptions.Parse(new[] { "--bench" }).IsBench);
+  }
+
+  // —— --trim [port]（2026-09-13 工作集回收的脚本入口）——
+  // 它和 --bench 同类：免锁、不是自检，但同样**绝不能**落到 Application.Run
+  // （否则一个只想回收内存的批处理会起出一个真托盘）。
+
+  [Fact] public void Trim_WithPort_UsesThatPort() {
+    var c = CliOptions.Parse(new[] { "--trim", "8082" });
+    Assert.True(c.IsTrim);
+    Assert.Equal(8082, c.TrimPort);
+    Assert.True(c.IsLockFree);
+    Assert.False(c.IsDiagnostic);
+  }
+
+  [Fact] public void Trim_WithoutPort_MeansAllConfiguredServices() {
+    var c = CliOptions.Parse(new[] { "--trim" });
+    Assert.True(c.IsTrim);
+    Assert.Equal(-1, c.TrimPort);
+    Assert.True(c.IsLockFree);
+  }
+
+  // 非数字跟在 --trim 后面 ⇒ 当作"没给端口"（= 全部），而不是 0（0 会被当成"端口 0"）
+  [Fact] public void Trim_NonNumericPort_FallsBackToAll() {
+    Assert.Equal(-1, CliOptions.Parse(new[] { "--trim", "abc" }).TrimPort);
+  }
+
+  [Fact] public void Trim_NotPresent_IsInert() {
+    var c = CliOptions.Parse(new[] { "--selftest-exit" });
+    Assert.False(c.IsTrim);
+    Assert.Equal(-1, c.TrimPort);
+  }
+
+  // —— 启动预热（2026-09-13）：--warmup 与 --trim 完全同构 ——
+  // 同构不是"顺手复制"：两者都是"不建 TrayApp 就跑完"的诊断旁路，任何一条落进
+  // Application.Run 都会起出一个永不退出的幽灵托盘，所以两条都要被同一条判据看住。
+  [Fact] public void Warmup_WithPort_UsesThatPort() {
+    var c = CliOptions.Parse(new[] { "--warmup", "8082" });
+    Assert.True(c.IsWarmup);
+    Assert.Equal(8082, c.WarmupPort);
+    Assert.True(c.IsLockFree);
+    Assert.False(c.IsDiagnostic);   // 与 --trim 一样：不是自检，是动作
+  }
+
+  [Fact] public void Warmup_WithoutPort_MeansAllConfiguredServices() {
+    var c = CliOptions.Parse(new[] { "--warmup" });
+    Assert.True(c.IsWarmup);
+    Assert.Equal(-1, c.WarmupPort);
+    Assert.True(c.IsLockFree);
+  }
+
+  [Fact] public void Warmup_NonNumericPort_FallsBackToAll() {
+    Assert.Equal(-1, CliOptions.Parse(new[] { "--warmup", "abc" }).WarmupPort);
+  }
+
+  [Fact] public void Warmup_NotPresent_IsInert() {
+    var c = CliOptions.Parse(new[] { "--selftest-exit" });
+    Assert.False(c.IsWarmup);
+    Assert.Equal(-1, c.WarmupPort);
+  }
+
+  // 两个旁路互不干扰：同时给 --trim 与 --warmup 时各自解析自己的端口
+  [Fact] public void Warmup_And_Trim_CoexistIndependently() {
+    var c = CliOptions.Parse(new[] { "--trim", "8081", "--warmup", "8082" });
+    Assert.Equal(8081, c.TrimPort);
+    Assert.Equal(8082, c.WarmupPort);
+    Assert.True(c.IsLockFree);
   }
 }

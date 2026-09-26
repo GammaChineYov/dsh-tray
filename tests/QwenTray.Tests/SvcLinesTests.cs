@@ -187,6 +187,58 @@ public class SvcLinesTests {
     Assert.Contains("视觉 不支持", SvcLines.CfgLines(v)[5]);
   }
 
+  // ---------- 「运行时配置」6 行 · 自定义参数（2026-09-20）----------
+  //
+  // 自定义参数的服务**没有托盘参数可言**：ctx / KV / 切分 / MTP / 缓存内存 那五行描述的是内置模板，
+  // 而这条服务根本没走模板 ⇒ 继续渲染等于把不存在的配置当事实报出来（用户会照着它去调参）。
+  // 契约不变：恒 6 行。
+
+  static SvcView CustomView() {
+    var v = View();
+    v.ArgsCustom = true;
+    v.Exe = "llama-kvmem-server.exe";
+    v.CustomArgs = "-c 262144 --kvmem-budget 36864 --kv-dtype q8_0";
+    v.EnvLine = "CUDA_VISIBLE_DEVICES=0 | KVMEM_VISION_DEVICE=gpu";
+    return v;
+  }
+
+  [Fact] public void CfgLines_CustomArgs_StillSixLines() {
+    foreach (var v in new[] { CustomView(), View() }) {
+      Assert.Equal(6, SvcLines.CfgLines(v).Length);
+      v.Running = true; v.RunCtx = 262144; v.RunVision = 1;
+      Assert.Equal(6, SvcLines.CfgLines(v).Length);
+    }
+  }
+
+  [Fact] public void CfgLines_CustomArgs_ReportsExeAndArgs_NotTrayParams() {
+    var l = SvcLines.CfgLines(CustomView());
+    Assert.Contains("Qwen3.8-27B-Q4_K_M.gguf", l[0]);          // 模型行仍然成立，照旧
+    Assert.Contains("exe = llama-kvmem-server.exe", l[1]);
+    Assert.Contains("自定义参数 6 项", l[1]);
+    Assert.Contains("--kvmem-budget 36864", l[2]);
+    Assert.Contains("已显示完全", l[3]);                        // 46 字符装得下 ⇒ 不出现"参数(续)"
+    Assert.Contains("环境 = CUDA_VISIBLE_DEVICES=0", l[4]);
+    // 托盘参数一律不得出现（它们对这条服务不成立）
+    foreach (var line in l)
+      foreach (var bad in new[] { "-ngl", "flash-attn", "--split-mode", "KV = ", "缓存内存 = ", "MTP = ", "上下文 = " })
+        Assert.DoesNotContain(bad, line);
+  }
+
+  [Fact] public void CfgLines_CustomArgs_LongString_SplitsOverTwoLines() {
+    var v = CustomView(); v.CustomArgs = new string('x', 200);
+    var l = SvcLines.CfgLines(v);
+    Assert.Contains("…", l[2]);                                 // 第一段被截断
+    Assert.StartsWith("    参数(续) = ", l[3]);                  // 余下接着排，不是丢掉
+  }
+
+  // 自定义参数下 ctx 不做"托盘参数回退"：-c 藏在参数串里，托盘并不知道它是多少，
+  // 拿菜单里的 ctxVal 冒充实测值正是这条分支要消灭的那个谎。
+  [Fact] public void CfgLines_CustomArgs_NoCtxFallback_WhenProbeEmpty() {
+    var v = CustomView(); v.Running = true; v.RunCtx = 0; v.RunVision = -1;
+    Assert.Contains("ctx 未探测", SvcLines.CfgLines(v)[5]);
+    Assert.DoesNotContain("192K", SvcLines.CfgLines(v)[5]);
+  }
+
   // ---------- 状态悬浮（StatusTip） ----------
 
   [Fact] public void StatusTip_NotRunning_HasNoPidNoRam() {
@@ -198,6 +250,17 @@ public class SvcLinesTests {
     Assert.DoesNotContain("内存:", t);                          // 未运行不报内存
     Assert.DoesNotContain("服务端实测", t);
     Assert.Equal(t, t.TrimEnd());                               // 末尾已 TrimEnd（否则 ToolTip 会多出一行空白）
+  }
+
+  // 自定义参数的服务：菜单 6 行只放得下截断版（CustomCfgLines），完整串落在这里 ——
+  // 这是"点不到菜单细节时的唯一出口"，所以**不截断**。默认服务则一行都不多。
+  [Fact] public void StatusTip_CustomArgs_AppendsExeArgsEnv_Unclipped() {
+    var v = CustomView(); v.CustomArgs = new string('y', 300);
+    string t = SvcLines.StatusTip(v);
+    Assert.Contains("exe: llama-kvmem-server.exe", t);
+    Assert.Contains(new string('y', 300), t);                   // 未被截断
+    Assert.Contains("环境: CUDA_VISIBLE_DEVICES=0", t);
+    Assert.DoesNotContain("exe: ", SvcLines.StatusTip(View())); // 默认服务不带这三行
   }
 
   [Fact] public void StatusTip_Busy_ExplainsPortReclaim() {
@@ -246,5 +309,73 @@ public class SvcLinesTests {
     Assert.DoesNotContain("服务端实测", SvcLines.StatusTip(v));
     v.RunCtx = 196608; v.RunVision = 1;
     Assert.Contains("服务端实测: ctx 192K · 视觉 支持", SvcLines.StatusTip(v));
+  }
+
+  // 一级项快捷启动的提示行（2026-09-12）：模型一级项的 ToolTip 就是本函数的输出（RefreshSvcMenu 每次都重写）
+  // ⇒ 这条提示必须**任何状态**下都在（未运行/启动中/运行中/被外部占用），否则用户发现不了这个交互。
+  [Fact] public void StatusTip_AlwaysCarriesQuickStartHint() {
+    Assert.Contains("直接点本一级项 = 快捷启动", SvcLines.StatusTip(View()));
+    var starting = View(); starting.Starting = true;
+    Assert.Contains("直接点本一级项 = 快捷启动", SvcLines.StatusTip(starting));
+    var running = View(); running.Running = true;
+    Assert.Contains("直接点本一级项 = 快捷启动", SvcLines.StatusTip(running));
+    var busy = View(); busy.PortBusy = true;
+    Assert.Contains("直接点本一级项 = 快捷启动", SvcLines.StatusTip(busy));
+  }
+
+  // ---------- 通知区 tooltip：行合成 + 127 字符钳位（2026-09-13） ----------
+
+  // 上限就是 Win32 szTip 的 127：超了 .NET 8 会抛 ArgumentException，而调用点在 try/catch 里 ⇒ 静默不刷新。
+  [Fact] public void Tip_ClampNeverExceeds127() {
+    var many = new List<string>();
+    for (int i = 0; i < 20; i++) many.Add("Qwen3.8-27B(" + (8080 + i) + "):运行 RAM 18.34G KV 1234/262144 缓存 12M/2048M");
+    var s = SvcLines.ClampTip(many);
+    Assert.True(s.Length <= SvcLines.TipMaxChars, "实得 " + s.Length + " 字符: " + s);
+  }
+
+  // 装得下时必须**一字不改**（钳位不能顺手改了正常情况下的观感）
+  [Fact] public void Tip_UnderLimit_IsUntouched() {
+    var lines = new List<string> { "Qwen3.8-27B(8082):运行 RAM 18.34G KV 1234/262144 缓存 12M/2048M", "GPU0: 20.3/22.0G 88% 62°C", "CPU: 12% 45°C 内存: 63%" };
+    Assert.Equal(string.Join("\n", lines), SvcLines.ClampTip(lines));
+  }
+
+  // 截断必须留省略号（让用户知道"后面还有，只是没显示"），而不是无声砍掉尾部
+  [Fact] public void Tip_Overflow_TruncatesTailWithEllipsis() {
+    var lines = new List<string> { new string('A', 100), new string('B', 100) };
+    var s = SvcLines.ClampTip(lines);
+    Assert.True(s.Length <= SvcLines.TipMaxChars, "实得 " + s.Length);
+    Assert.StartsWith(new string('A', 100), s);          // 第一行完整保留
+    Assert.EndsWith("…", s);                              // 溢出有明确标记
+    int b = s.Count(c => c == 'B');
+    Assert.True(b > 0 && b < 100, "末行应被**截断**而不是整行丢弃，实得 " + b + " 个 B");
+  }
+
+  // 极窄上限也不许崩、不许返回超长串（兜底分支）
+  [Fact] public void Tip_TinyLimit_IsSafe() {
+    var s = SvcLines.ClampTip(new List<string> { "abcdef" }, 3);
+    Assert.True(s.Length <= 3, s);
+  }
+
+  [Fact] public void Tip_EmptyInput_IsEmpty() {
+    Assert.Equal("", SvcLines.ClampTip(new List<string>()));
+  }
+
+  // 单模型行：KV 总量为 0（未探到 /props）⇒ **整段 KV 不出现**，不能显示 "KV 0/0"
+  [Fact] public void SvcTipLine_HidesKvWhenTotalUnknown() {
+    var s = SvcLines.SvcTipLine("Qwen3.8-27B", 8082, "运行", "18.34G", 0, 0, 0, 0);
+    Assert.Equal("Qwen3.8-27B(8082):运行 RAM 18.34G 缓存 无", s);
+  }
+
+  [Fact] public void SvcTipLine_ShowsBothMetricsWhenProbed() {
+    var s = SvcLines.SvcTipLine("Qwen3.8-27B", 8082, "运行", "18.34G", 1234, 262144, 12, 2048);
+    Assert.Equal("Qwen3.8-27B(8082):运行 RAM 18.34G KV 1234/262144 缓存 12M/2048M", s);
+  }
+
+  // 缓存上限为 0（llama 未以 -lv 4 启动 ⇒ 拿不到那行 trace）⇒ 显示「无」。
+  // 🔴 关键纪律：**绝不许**退回 cfg 里的 cacheRam 设定值冒充"实测用量"（那是编数据）。
+  [Fact] public void SvcTipLine_CacheUnavailable_SaysNone_NotConfiguredValue() {
+    var s = SvcLines.SvcTipLine("Qwen3.8-27B", 8082, "运行", "18.34G", 100, 262144, 0, 0);
+    Assert.Contains("缓存 无", s);
+    Assert.DoesNotContain("2048", s);
   }
 }

@@ -33,11 +33,29 @@ public class ServiceSpec {
   public bool SpecDecode = false;
   public string Provider = "";   // DSH provider 名（打开会话时写入 agent-default-model）
 
-  // 历史遗留：2026-09-12 对全项目做了一次读写点核查（grep `\.Ctx\b`），确认它
-  // **无任何读写点** —— 既不是通过配置进入的，也没有被 LaunchArgs / 界面用过。
-  // 依「宁留注释不删」的惯例留在这里（而不是随切分丢掉）：将来若要支持
-  // 「每个模型各自的默认 ctx」，这就是现成的落点。
-  public int Ctx;
+  // —— per-service 覆盖（2026-09-20，对应 ServiceConfig 的同名三项）——
+  // 默认空 ⇒ 走全局 exe 与 LaunchArgs.Build 的内置模板 = 改动前的行为。
+  // 合成规则（谁覆盖谁、自定义参数时环境变量怎么算）**全部收在 LaunchPlan 一处**，
+  // 本结构只负责"承载用户写了什么"，不判断怎么用。
+  public string Exe = "";
+  public string Args = "";
+  public string Env = "";
+
+  // —— 参数型覆盖（2026-09-26；与 ServiceConfig 同名字段一一对应）——
+  // null = 未设置 ⇒ 走全局默认；非 null = 本模型自己的值（启动优先用它）。解析在 SvcParams.Resolve。
+  // ⚠️ 下面这一组取代了原先那枚 `public int Ctx;`（同名冲突，已合并为一处）：
+  //    2026-09-12 全项目读写点核查（`grep \.Ctx\b`）确认旧字段**零读写点** —— 既不是通过配置
+  //    进入的，也没被 LaunchArgs / 界面用过，纯历史遗留。合并到这里的语义更准：将来若要支持
+  //    「每个模型各自的默认 ctx」，这就是现成的落点（旧注释的原意完整保留）。
+  public int? Ctx;
+  public int? KvMode;
+  public int? CacheRam;
+  public int? SplitMode;
+  public int? TsGpu1;
+  public int? MtpLevel;
+  public int? ParamMode;
+  public bool? BindAll;
+  public string GpuSel = "";
 
   // 从配置文件构造。把「Spec 从哪来」的知识收在 Spec 自己身上，
   // 而不是散落在 TrayApp 的构造循环里（S3 搬 Core 时这条转换路径也要一起搬）。
@@ -47,6 +65,10 @@ public class ServiceSpec {
       Name = sc.Name, Port = sc.Port, Model = sc.Model,
       UseMmproj = sc.UseMmproj, Mmproj = sc.Mmproj,
       SpecDecode = sc.SpecDecode, Provider = sc.Provider,
+      Exe = sc.Exe, Args = sc.Args, Env = sc.Env,
+      Ctx = sc.Ctx, KvMode = sc.KvMode, CacheRam = sc.CacheRam, SplitMode = sc.SplitMode,
+      TsGpu1 = sc.TsGpu1, MtpLevel = sc.MtpLevel, ParamMode = sc.ParamMode,
+      BindAll = sc.BindAll, GpuSel = sc.GpuSel,
     };
     if (sc.Batch > 0) s.Batch = sc.Batch;
     if (sc.Ubatch > 0) s.Ubatch = sc.Ubatch;

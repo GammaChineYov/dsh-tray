@@ -72,6 +72,46 @@ public static class SvcConfigDiff {
       cur.Provider = sc.Provider;
     }
 
+    // —— per-service 覆盖（2026-09-20）：同样"留空 = 不表态" ——
+    // 即：从 JSON 里删掉 Exe/Args/Env 三项**不会**让本服务退回内置模板，只是维持上次读到的值
+    // （与 Provider/Batch 的既有惯例一致）。要真正退回内置行为，改 JSON 后**重启托盘**。
+    // 为什么不让"删掉 = 清空"：那样一次误删键就把服务打回通用模板，症状（换了 exe/参数却无声恢复）
+    // 比"删了没反应"难查得多。
+    if (!string.IsNullOrEmpty(sc.Exe) && sc.Exe != cur.Exe) {
+      diffs.Add("exe " + (cur.Exe.Length > 0 ? SvcLines.FileName(cur.Exe) : "（全局）") + " → " + SvcLines.FileName(sc.Exe));
+      cur.Exe = sc.Exe;
+    }
+    // —— 参数型覆盖（2026-09-26）：「重启模型」重读配置时要把它们一起读回来 ——
+    // "null / 空 = 不表态" 与上面 Exe/Env 同一条守卫：JSON 里没写这项就不覆盖内存里的值。
+    // 返回**本项最终取值**：from 有值就用它（记一条 diff），否则保持原值（本模型未设置 ⇒ 走全局默认）。
+    // 写成"返回新值"而不是"就地改 cur"，是因为 cur 是对象、各字段要各自独立回落，没法用同一个 ref 串起来。
+    int? Take(int? from, int? cur, string key, List<string> d) {
+      if (from.HasValue && from.Value != cur) {
+        d.Add(key + " " + (cur.HasValue ? cur.Value.ToString() : "（全局）") + " → " + from.Value);
+        return from.Value;
+      }
+      return cur;
+    }
+    cur.Ctx       = Take(sc.Ctx,       cur.Ctx,       "ctx",       diffs);
+    cur.KvMode    = Take(sc.KvMode,    cur.KvMode,    "KV",        diffs);
+    cur.CacheRam  = Take(sc.CacheRam,  cur.CacheRam,  "缓存内存",  diffs);
+    cur.SplitMode = Take(sc.SplitMode, cur.SplitMode, "切分",      diffs);
+    cur.TsGpu1    = Take(sc.TsGpu1,    cur.TsGpu1,    "GPU1占比",  diffs);
+    cur.MtpLevel  = Take(sc.MtpLevel,  cur.MtpLevel,  "MTP",       diffs);
+    cur.ParamMode = Take(sc.ParamMode, cur.ParamMode, "参数组",    diffs);
+    if (sc.BindAll.HasValue && sc.BindAll.Value != cur.BindAll) { diffs.Add("监听 " + (cur.BindAll == true ? "0.0.0.0" : "127.0.0.1") + " → " + (sc.BindAll.Value ? "0.0.0.0" : "127.0.0.1")); cur.BindAll = sc.BindAll.Value; }
+    if (!string.IsNullOrEmpty(sc.GpuSel) && sc.GpuSel != cur.GpuSel) { diffs.Add("GPU 选择 " + (cur.GpuSel.Length > 0 ? cur.GpuSel : "（全局）") + " → " + sc.GpuSel); cur.GpuSel = sc.GpuSel; }
+
+    // Args/Env 长度可以到数百字符，日志里只报"变了"与长度，不把整串塞进一行日志
+    if (!string.IsNullOrEmpty(sc.Args) && sc.Args != cur.Args) {
+      diffs.Add("参数串 自定义（" + sc.Args.Length + " 字符）");
+      cur.Args = sc.Args;
+    }
+    if (!string.IsNullOrEmpty(sc.Env) && sc.Env != cur.Env) {
+      diffs.Add("环境变量 自定义（" + sc.Env.Length + " 字符）");
+      cur.Env = sc.Env;
+    }
+
     return diffs;
   }
 }

@@ -17,6 +17,33 @@ public class ServiceConfig {
   public bool SpecDecode { get; set; }
   public string Provider { get; set; } = "";   // DSH provider 名（打开会话时写入 agent-default-model）
   public bool Enabled { get; set; } = true;
+
+  // —— per-service 覆盖（2026-09-20）——
+  // 为什么需要：托盘原本只有**一个全局 exe**（AppConfig.LlamaServerExe）和**一套写死的
+  // llama-server 参数模板**（LaunchArgs.Build）。而 llm-deploy 的 kvmem 移植用的是另一个
+  // 可执行文件（llama-kvmem-server.exe）、另一套参数方言（--kv-dtype / --kvmem-*）和四个
+  // CUDA 环境变量。让它出现在托盘服务列表里，就必须让**服务项**能覆盖这三样。
+  // 三个字段都是**可选**的：全留空 = 该服务与改动前逐字节一致（零回归）。
+  public string Exe { get; set; } = "";    // 覆盖 AppConfig.LlamaServerExe；空 = 用全局
+  public string Args { get; set; } = "";   // 完整参数串；非空 ⇒ 完全取代内置模板（见 LaunchPlan）
+  public string Env { get; set; } = "";    // 追加环境变量："K=V"，**一行一项**（换行分隔）；同名覆盖内置值。⛔ 不用分号：PATH 的值本身就含 ';'
+
+  // —— 参数型覆盖（2026-09-26）——
+  // 语义变更：菜单里的「上下文 / KV / 缓存内存 / 切分 / GPU1 占比 / MTP / 参数组 / 监听」从
+  // 「启动时覆盖所有模型」改为「**改的就是当前选中模型的持久化配置**」：
+  //   null  = 本模型未设置 ⇒ 用全局默认（dsh-tray.cfg）；
+  //   非 null = 本模型自己的值，**启动该模型时优先用它**（写进 dsh-tray-config.json，重启托盘后仍在）。
+  // ⚠️ 为什么用 int? / bool? 而不是 0：0 是合法值（如 cacheRam=0=禁用、bind=127.0.0.1），
+  //    用非空类型才能区分"没写"与"写了 0"（与 Batch/Ubatch/Provider 同一条守卫惯例）。
+  public int? Ctx { get; set; }
+  public int? KvMode { get; set; }
+  public int? CacheRam { get; set; }
+  public int? SplitMode { get; set; }
+  public int? TsGpu1 { get; set; }
+  public int? MtpLevel { get; set; }
+  public int? ParamMode { get; set; }
+  public bool? BindAll { get; set; }
+  public string GpuSel { get; set; } = "";   // 空 = 用全局 GPU 选择（GpuSelection.FromCfg 的串）
 }
 
 // 应用环境配置
@@ -71,6 +98,14 @@ public static class Config {
     if (string.IsNullOrEmpty(c.SettingsYamlPath)) c.SettingsYamlPath = d.SettingsYamlPath;
     if (string.IsNullOrEmpty(c.OfficialDeepSeekUrl)) c.OfficialDeepSeekUrl = d.OfficialDeepSeekUrl;
     return c;
+  }
+
+  /// <summary>把内存里的配置**整份**写回 dsh-tray-config.json（2026-09-26）。
+  /// 只用于「改了参数就落到对应模型配置」这条新语义 —— ⚠️ 它会抹掉文件里所有未走托盘写入的
+  /// 手工修改，所以调用点必须传**从 Load() 读出来的同一份对象**（cfg），别传重建的默认值。</summary>
+  public static void Save(AppConfig c) {
+    if (c == null) return;
+    try { File.WriteAllText(Path_, JsonSerializer.Serialize(c, new JsonSerializerOptions { WriteIndented = true })); } catch {}
   }
 
   public static AppConfig Load() {

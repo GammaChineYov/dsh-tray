@@ -77,10 +77,13 @@ public partial class TrayApp {
   // 在 settings.yaml 的 llm-pi-ai.providers 下确保 <provider> 块存在，并把 provider 的模型条目全量校准为托盘/服务端实际配置：
   //   baseURL(端口) / 模型 id / displayName+name(托盘服务名) / contextWindow(实际 ctx) / maxTokens(ctx 推导) / input(视觉→含 image)
   // 只改 llm-pi-ai.providers 对应块；其它 provider 与顶层键一律保持。返回修改后的全文；任何失败/异常原样返回 y。
-  string EnsureLlamaProvider(string y, string provider, int port, string model, string modelName, int ctx, bool vision){
+  // ctx 传 **int?**：null = 本服务真实 ctx **未知**。这只会发生在「自定义参数服务且 /props 探不到」——
+  // 那时 `-c` 藏在参数串里，托盘无从得知，退到全局 ctx 等于编一个数静默写进 contextWindow，
+  // 而 contextWindow 写错不报错、只会在长对话时被服务端截断。null ⇒ **保留 YAML 里原值**（首次建档则整个键不写）。
+  string EnsureLlamaProvider(string y, string provider, int port, string model, string modelName, int? ctx, bool vision){
     try{
       string inputVal = vision ? "[ text, image ]" : "[ text ]";
-      int maxTok = Math.Max(1024, Math.Min(32000, ctx/2));   // 输出预算 ≈ ctx 一半、上限 32000（与既有手工值风格一致）
+      int maxTok = ctx.HasValue ? Math.Max(1024, Math.Min(32000, ctx.Value/2)) : 0;   // 输出预算 ≈ ctx 一半、上限 32000（与既有手工值风格一致）
       var lines=new List<string>(y.Split('\n'));
       int Ind(string l){ int n=0; while(n<l.Length&&l[n]==' ') n++; return n; }
       int FindExact(int from,int ind_,string marker){ for(int i=from;i<lines.Count;i++) if(Ind(lines[i])==ind_ && lines[i].Trim()==marker) return i; return -1; }
@@ -97,11 +100,15 @@ public partial class TrayApp {
           "      apiKeyEnv: LLAMA_LOCAL_API_KEY",
           "      models:",
           "        - id: '"+model+"'",
-          "          name: "+Yq(modelName),
-          "          contextWindow: "+ctx,
-          "          maxTokens: "+maxTok,
-          "          input: "+inputVal
+          "          name: "+Yq(modelName)
         };
+        // ctx 未知（自定义参数且未探测到）时**不写** contextWindow/maxTokens —— 宁缺，也不编一个数。
+        // 用户下次在服务运行中打开会话即会走更新路径把它补上（自愈）。
+        if(ctx.HasValue){
+          block.Add("          contextWindow: "+ctx.Value);
+          block.Add("          maxTokens: "+maxTok);
+        }
+        block.Add("          input: "+inputVal);
         lines.InsertRange(ins,block);
         return string.Join("\n",lines);
       }
@@ -120,9 +127,12 @@ public partial class TrayApp {
         var idm=System.Text.RegularExpressions.Regex.Match(body[idIdx], @"^(\s*)- id:\s*.*$");
         body[idIdx]=idm.Groups[1].Value+"- id: '"+model+"'";
         int en=idIdx+1; for(int i=idIdx+1;i<body.Count;i++){ if(body[i].Trim().Length==0) continue; if(Ind(body[i])<10){ en=i; break; } en=i+1; } // 条目字段区(缩进10)终点
-        string[] keys={"name","contextWindow","maxTokens","input"};
-        string[] vals={ Yq(modelName), ctx.ToString(), maxTok.ToString(), inputVal };
-        for(int k=0;k<keys.Length;k++){
+        var keys=new List<string>{"name"};
+        var vals=new List<string>{ Yq(modelName) };
+        if(ctx.HasValue){ keys.Add("contextWindow"); vals.Add(ctx.Value.ToString());
+                          keys.Add("maxTokens");    vals.Add(maxTok.ToString()); }
+        keys.Add("input"); vals.Add(inputVal);
+        for(int k=0;k<keys.Count;k++){
           bool found=false;
           for(int i=idIdx+1;i<en;i++){ var m=System.Text.RegularExpressions.Regex.Match(body[i], @"^(\s*)"+keys[k]+@":\s*.*$"); if(m.Success){ found=true; body[i]=m.Groups[1].Value+keys[k]+": "+vals[k]; break; } }
           if(!found){ body.Insert(en,"          "+keys[k]+": "+vals[k]); en++; }
@@ -140,26 +150,35 @@ public partial class TrayApp {
   void SyncSessionConfig(Service svc){
     string orig=null; string yp=cfg.SettingsYamlPath;
     try{
-      int effCtx=ctxVal; bool effVis=svc.UseMmproj; string src="托盘配置";
-      if(svc.Running){
-        var pr=ProbeLlamaProps(svc.Port);
-        if(pr.Item1>0){ effCtx=pr.Item1; src="服务端实测"; }
-        if(pr.Item2.HasValue){ effVis=pr.Item2.Value; if(src=="托盘配置") src="服务端实测"; }
-      }
+      // —— ctx 的来源优先级（只有一条规则：能实测就实测）——
+      //  ① /props 探到 ⇒ 采信实测值。**不再以 svc.Running 为前提**：探测本来就只读、失败返回 (0,null)，
+      //     而"端口上有服务但托盘未托管"（PortBusy）恰恰是探得到、却因门控探不到的情况。
+      //  ② 探不到 + 内置模板服务 ⇒ 回退托盘 ctx（那种服务的 -c 就是菜单里这个值，是同义事实）。
+      //  ③ 探不到 + **自定义参数**服务 ⇒ ctx **未知**（null）。-c 藏在参数串里，托盘不知道它是多少，
+      //     拿全局 ctx 顶上等于编一个数，而它会被静默写进 settings.yaml ⇒ 见 EnsureLlamaProvider 的说明。
+      bool custom=!string.IsNullOrWhiteSpace(svc.Spec.Args);
+      int? effCtx=null; string src=""; bool effVis=svc.UseMmproj;
+      var pr=ProbeLlamaProps(svc.Port);
+      if(pr.Item1>0){ effCtx=pr.Item1; src="服务端实测"; }
+      else if(!custom){ effCtx=ctxVal; src="托盘配置"; }
+      if(pr.Item2.HasValue){ effVis=pr.Item2.Value; if(src.Length==0) src="服务端实测"; }
       string y=File.ReadAllText(yp);
       string prov=string.IsNullOrEmpty(svc.Provider)? "llama-local" : svc.Provider;
       y=EnsureLlamaProvider(y, prov, svc.Port, svc.Model, svc.Name, effCtx, effVis);   // ctx/视觉/maxTokens/名称全量校准
       orig=ExtractBlock(y);
       File.WriteAllText(yp, ReplaceBlock(y, "agent-default-model:\r\n  provider: "+prov+"\r\n  model: '"+svc.Model+"'\r\n"));
-      logForm.Append("打开 DSH 会话（"+Short(svc)+"）→ agent-default-model="+prov+"\r\n");
-      logForm.Append("    已同步 dsh 模型声明: ctx="+(effCtx/1024)+"K("+src+") 视觉="+(effVis?"支持":"不支持")+" maxTokens="+Math.Max(1024,Math.Min(32000,effCtx/2))+"\r\n");
+      logForm.Append(SessionEntryLabels.OpenLogPrefix(builtinRender)+"（"+Short(svc)+"）→ agent-default-model="+prov+"\r\n");
+      logForm.Append("    已同步 dsh 模型声明: ctx="
+        + (effCtx.HasValue ? (effCtx.Value/1024)+"K("+src+")" : "未知（自定义参数且未探测到 → 保留原值）")
+        + " 视觉="+(effVis?"支持":"不支持")
+        + (effCtx.HasValue ? " maxTokens="+Math.Max(1024,Math.Min(32000,effCtx.Value/2)) : "")+"\r\n");
     }catch(Exception ex){ logForm.Append("打开会话同步配置失败: "+ex.Message+"\r\n"); }
     if(orig!=null){ var rt=new System.Windows.Forms.Timer(); rt.Interval=30000; rt.Tick+=(s,e)=>{ try{ File.WriteAllText(yp, ReplaceBlock(File.ReadAllText(yp), orig)); }catch{} rt.Stop(); rt.Dispose(); }; rt.Start(); }
   }
   void OpenPop(){ if(builtinRender){ OpenThin(""); return; } EnsurePopupNav(cfg.DshUrl,false); }
   void OpenSessionById(string sessionId){ try{ if(builtinRender){ OpenThin(sessionId); MarkSessionRead(sessionId); return; } EnsurePopupNav(BuildSessionUrl(sessionId),true); MarkSessionRead(sessionId); }catch(Exception ex){ MessageBox.Show("打开会话失败: "+ex.Message); } }
   // —— 内置渲染 / 安全模式 / 插件管理 ——
-  void ToggleBuiltinRender(){ builtinRender=!builtinRender; RefreshChecks(); SaveCfg(); logForm.Append("使用托盘内置渲染打开: "+(builtinRender?"开（打开会话走托盘瘦客户端，绕过官方客户端 bundle）":"关（打开会话走官方 Web UI）")+"\r\n"); }
+  void ToggleBuiltinRender(){ builtinRender=!builtinRender; RefreshChecks(); SaveCfg(); logForm.Append("使用托盘内置渲染打开: "+(builtinRender?"开（打开会话走托盘瘦客户端，绕过官方客户端 bundle）":"关（打开会话走官方 Web UI）")+"\r\n"+SessionEntryLabels.ToggleLogSuffix(builtinRender)+"\r\n"); }
   void ToggleSafeMode(){ safeMode=!safeMode; RefreshChecks(); SaveCfg(); logForm.Append("安全模式启动: "+(safeMode?"开（仅官方插件白名单，下次启动/重启 DSH 生效）":"关（下次启动/重启 DSH 恢复全量插件）")+"\r\n"); }
   void OpenThin(string sid){
     try{
@@ -415,8 +434,12 @@ public partial class TrayApp {
     int idx=dshMenu.DropDownItems.IndexOf(recentHeader); if(idx<0) return;
     while(dshMenu.DropDownItems.Count>idx+1) dshMenu.DropDownItems.RemoveAt(idx+1);
     var list=recentList;
-    if(list==null||list.Count==0){ dshMenu.DropDownItems.Insert(idx+1,new ToolStripMenuItem("（暂无未归档会话）"){Enabled=false}); return; }
-    for(int i=0;i<list.Count;i++){ var rr=list[i];
+    if(list==null||list.Count==0){
+      var it=new ToolStripMenuItem("（暂无未归档会话）"){Enabled=false};
+      dshMenu.DropDownItems.Insert(idx+1,it);
+      _keep.WireNew(menu,dshMenu.DropDown,it);   // 动态项在创建处就地补挂（这一支原来提前 return ⇒ 会漏挂）
+    }
+    else for(int i=0;i<list.Count;i++){ var rr=list[i];
       int code=_sessState.TryGetValue(rr.Id,out var cs)?cs:SST_UNKNOWN;
       bool unread=(code==SST_DONE)&&!SessionRead(rr.Id);
       var it=new ToolStripMenuItem(RecentLabel(rr),null,(s,e)=>OpenSessionById(rr.Id));
@@ -428,7 +451,11 @@ public partial class TrayApp {
       }
       it.ToolTipText=tip;
       dshMenu.DropDownItems.Insert(idx+1+i,it);
+      _keep.WireNew(menu,dshMenu.DropDown,it);   // ③类（打开会话=离开菜单看结果）⇒ 自动 CloseSoon（防"点完赖着不走"）
     }
+    _keep.Hook(menu);   // 兜底再走一遍整树（幂等；防止将来有人加了新分支忘挂）
+    MenuPlace.GuardAll(menu);   // 同上：落点护栏也走一遍整树（幂等）
+    AttachMenuTips();   // 悬停提示同理：新插入的最近会话项需要补挂自绘提示（幂等，弱键表去重）
   }
   string RecentLabel(RecentSession r){
     string t=r.Title; if(string.IsNullOrWhiteSpace(t)){ t="(无标题 "+ShortId(r.Id)+")"; }
@@ -458,4 +485,4 @@ public partial class TrayApp {
   }
 
 }
-
+

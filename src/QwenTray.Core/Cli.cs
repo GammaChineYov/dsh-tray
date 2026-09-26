@@ -26,6 +26,22 @@ public sealed class CliOptions {
   public bool SelftestPerf;      // --selftest-perf
   public bool SelftestLogSink;   // --selftest-logsink
   public bool SelftestUiThread;  // --selftest-uithread
+  public bool SelftestMenuKeep;  // --selftest-menukeep （菜单「点了关不关」裁决器）
+  public bool SelftestTips;      // --selftest-tips     （悬停提示窗四判据：不压光标，铁律 8）
+  public bool SelftestMemTrim;   // --selftest-memtrim  （内存回收策略矩阵 + 菜单接线 + 可选实测）
+  public bool SelftestWarmup;    // --selftest-warmup   （启动预热判定 + 菜单接线 + 运行态登记）
+
+  // —— 工作集回收（2026-09-13）：DSHTray.exe --trim [port] ——
+  // 只清了模型进程的工作集页（EmptyWorkingSet），不动模型本身：不重启、不断会话。
+  // port 缺省/非数字 ⇒ -1 ⇒ 处理配置里全部启用的服务。
+  public bool Trim;
+  public int  TrimPort = -1;
+
+  // —— 启动预热（2026-09-13）：DSHTray.exe --warmup [port] ——
+  // 把 L3 硬盘缓存里最近的条目 restore 回空闲槽，让重启后的第一条长前缀不必全量重算。
+  // 与 --trim 同款：不建 TrayApp、不占单实例锁、**绝不**走到 Application.Run。
+  public bool Warmup;
+  public int  WarmupPort = -1;
 
   // —— 命令行真实基准：DSHTray.exe --bench <port> [promptTok] [genTok] [runs] ——
   public int BenchPort;
@@ -38,16 +54,23 @@ public sealed class CliOptions {
   public bool NoStop;    // --nostop  ：legacy alias，等价默认（保留模型）
   public bool AskExit;   // --exit | --nostop | --stopall
 
-  /// <summary>全部「诊断/自检模式」——**不含** --bench（它和探针共用同一批前置 return，但语义上不是自检）。</summary>
+  /// <summary>全部「诊断/自检模式」——**不含** --bench / --trim / --warmup（它们和探针共用同一批前置 return，但语义上不是自检）。</summary>
   public bool IsDiagnostic =>
     DumpMenu || SelftestLogWin || SelftestMenuShow || SelftestPlugins || SelftestRpc || SelftestLock ||
-    SelftestExit || SelftestSvcMenu || SelftestPerf || SelftestLogSink || SelftestUiThread;
+    SelftestExit || SelftestSvcMenu || SelftestPerf || SelftestLogSink || SelftestUiThread || SelftestMenuKeep ||
+    SelftestTips || SelftestMemTrim || SelftestWarmup;
 
   /// <summary>--bench 是否给了可用端口（端口解析失败 ⇒ 0 ⇒ 不是基准模式）。</summary>
   public bool IsBench => BenchPort > 0;
 
+  /// <summary>--trim 是否生效（只看标志；TrimPort=-1 表示"配置里全部启用的服务"）。</summary>
+  public bool IsTrim => Trim;
+
+  /// <summary>--warmup 是否生效（只看标志；WarmupPort=-1 表示"配置里全部启用的服务"）。</summary>
+  public bool IsWarmup => Warmup;
+
   /// <summary>不占单实例锁、不建 TaskbarWatcher、**绝不**走到 Application.Run。</summary>
-  public bool IsLockFree => IsDiagnostic || IsBench;
+  public bool IsLockFree => IsDiagnostic || IsBench || IsTrim || IsWarmup;
 
   public static CliOptions Parse(string[]? args) {
     var c = new CliOptions();
@@ -70,6 +93,24 @@ public sealed class CliOptions {
     c.SelftestPerf     = Has("--selftest-perf");
     c.SelftestLogSink  = Has("--selftest-logsink");
     c.SelftestUiThread = Has("--selftest-uithread");
+    c.SelftestMenuKeep = Has("--selftest-menukeep");
+    c.SelftestTips     = Has("--selftest-tips");
+    c.SelftestMemTrim  = Has("--selftest-memtrim");
+    c.SelftestWarmup   = Has("--selftest-warmup");
+
+    // --trim [port]：标志存在即生效；后面若跟了一个非负整数就当端口，否则 -1（= 全部启用的服务）
+    int ti = Array.IndexOf(args, "--trim");
+    if (ti >= 0) {
+      c.Trim = true;
+      if (ti + 1 < args.Length && int.TryParse(args[ti + 1], out int tp) && tp >= 0) c.TrimPort = tp;
+    }
+
+    // --warmup [port]：与 --trim 完全同构（含"非数字 ⇒ -1"的容错）
+    int wi = Array.IndexOf(args, "--warmup");
+    if (wi >= 0) {
+      c.Warmup = true;
+      if (wi + 1 < args.Length && int.TryParse(args[wi + 1], out int wp) && wp >= 0) c.WarmupPort = wp;
+    }
 
     // 只认第一个 --bench；端口缺失/非数字 ⇒ TryParse 置 0 ⇒ 非基准模式（与抽取前一致）
     int bi = Array.IndexOf(args, "--bench");
